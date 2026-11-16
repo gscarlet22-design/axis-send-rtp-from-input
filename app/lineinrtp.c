@@ -28,6 +28,8 @@
 
 #include <axsdk/axevent.h>
 #include <axsdk/axparameter.h>
+#include <curl/curl.h>
+#include <gio/gio.h>
 #include <glib.h>
 #include <jansson.h>
 
@@ -44,6 +46,15 @@
 #define RING_CAP 1600U
 #define RTP_SAMPLES 160U
 #define DEFAULT_NODE "AudioDevice0Input0.Unprocessed"
+#define HIST_LEN 64U
+#define HIST_INTERVAL_MS 100
+#define CFG_RELOAD_MS 1000
+#define ALARM_POLL_MS 5000
+#define CREDENTIAL_RETRY_MS 30000
+#define AUDIO_WATCHDOG_MS 5000
+#define RETRY_MIN_MS 1000
+#define RETRY_MAX_MS 30000
+#define VAPIX_ALARM_URL "http://127.0.0.12/axis-cgi/param.cgi?action=list&group=root.AudioSource.A0.AlarmLevel"
 
 struct cfg {
     bool enabled;
@@ -60,11 +71,26 @@ struct cfg {
     char input_node[NAME_MAX_LEN + 1];
 };
 
+/* HTTP thread -> control thread. */
 struct pending_cfg {
     bool have;
     bool have_alarm;
     int alarm_level;
+    unsigned rev;
     struct cfg cfg;
+};
+
+/* Control thread -> main loop. The main loop never touches AXParameter or
+ * VAPIX itself, so it never blocks on D-Bus or HTTP while audio is flowing. */
+struct ctl_update {
+    bool have_cfg;
+    struct cfg cfg;
+    char cfg_error[160];
+    unsigned rev;
+    char save_error[160];
+    bool have_alarm;
+    int alarm_level;
+    char alarm_source[8];
 };
 
 struct status_snap {
@@ -94,10 +120,19 @@ struct status_snap {
     char connected_node[NAME_MAX_LEN + 1];
     char last_error[160];
     char last_rtp_header[25];
+    char alarm_source[8];
+    char config_error[160];
+    unsigned config_rev;
     uint64_t packets_sent;
     uint64_t send_errors;
     uint64_t samples_dropped;
     unsigned buffered_samples;
+    uint32_t hist_seq;
+    unsigned hist_count;
+    uint8_t hist_level[HIST_LEN];
+    uint8_t hist_gate[HIST_LEN];
+    int8_t hist_port1[HIST_LEN];
+    int8_t hist_port2[HIST_LEN];
 };
 
 struct node_ref {
@@ -111,6 +146,8 @@ struct impl {
     struct pw_context* context;
     struct pw_core* core;
     struct pw_registry* registry;
+    struct spa_hook core_listener;
+    bool core_hooked;
     struct spa_hook registry_listener;
     struct spa_source* timer_source;
     struct pw_stream* stream;
@@ -123,12 +160,37 @@ struct impl {
     AXParameter* params;
     int http_listen_fd;
     pthread_t http_thread;
+    pthread_t control_thread;
+    bool control_started;
 };
 
 static struct impl g_impl;
 static pthread_mutex_t g_mu = PTHREAD_MUTEX_INITIALIZER;
+/* Guarded by g_mu. */
+static pthread_cond_t g_ctl_cond;
+static bool g_ctl_stop;
 static struct pending_cfg g_pending;
+static struct ctl_update g_ctl;
+static unsigned g_cfg_rev_requested;
 static struct status_snap g_status;
+/* Main loop only. */
+static char g_alarm_source[8] = "none";
+static char g_shown_cfg_error[160];
+static unsigned g_cfg_rev_applied;
+static char g_cfg_save_error[160];
+static bool g_stream_failed;
+static int64_t g_retry_at;
+static int g_retry_ms = RETRY_MIN_MS;
+static int64_t g_last_process_ms;
+static int64_t g_connected_ms;
+static int g_exit_code = EXIT_SUCCESS;
+static uint8_t g_hist_level[HIST_LEN];
+static uint8_t g_hist_gate[HIST_LEN];
+static int8_t g_hist_port1[HIST_LEN];
+static int8_t g_hist_port2[HIST_LEN];
+static uint32_t g_hist_seq;
+static int64_t g_hist_next_ms;
+static double g_hist_peak;
 static struct cfg g_cfg;
 static int64_t g_hot_since;
 static int64_t g_quiet_since;
@@ -166,14 +228,13 @@ static pthread_t g_event_thread;
 static bool g_event_started;
 static gint g_event_ready;
 static gint g_event_stop;
-static int64_t g_last_cfg_ms;
 static bool g_pw_inited;
 static bool g_registry_hooked;
 static int port_is_active(int which);
 static int64_t g_last_report_ms;
 
 static void publish_status(const char* gate);
-static void ensure_stream(struct impl* impl);
+static void ensure_stream(struct impl* impl, int64_t now);
 static int64_t now_ms(void);
 
 static int64_t now_ms(void) {
@@ -312,26 +373,33 @@ static void param_str(AXParameter* handle, const char* name, char* dest, size_t 
     g_clear_error(&error);
 }
 
-static void load_cfg(struct impl* impl) {
+static const char* trigger_name(int trigger_port) {
+    return trigger_port == 1 ? "port1" : trigger_port == 2 ? "port2" : "level";
+}
+
+/* Reads every app parameter. Blocking D-Bus calls, so only the control thread
+ * (and main() before any audio runs) may call it. */
+static void read_cfg(AXParameter* params, struct cfg* out, char* err, size_t err_len) {
     struct cfg next;
 
     memset(&next, 0, sizeof next);
-    if (impl->params == NULL) {
+    err[0] = '\0';
+    if (params == NULL) {
         next.destination_port    = 49000;
         next.threshold_db        = -45;
         next.margin_db           = 6;
         next.activation_delay_ms = 200;
         next.deactivation_delay_s = 2;
         snprintf(next.input_node, sizeof next.input_node, "%s", DEFAULT_NODE);
-        g_cfg = next;
+        *out = next;
         return;
     }
-    next.enabled              = param_yes(impl->params, "Enabled", false);
-    next.force_on             = param_yes(impl->params, "ForceOn", false);
-    next.test_mode            = param_yes(impl->params, "TestMode", false);
+    next.enabled              = param_yes(params, "Enabled", false);
+    next.force_on             = param_yes(params, "ForceOn", false);
+    next.test_mode            = param_yes(params, "TestMode", false);
     {
         char trigger[16];
-        param_str(impl->params, "Trigger", trigger, sizeof trigger, "level");
+        param_str(params, "Trigger", trigger, sizeof trigger, "level");
         if (strcmp(trigger, "port1") == 0) {
             next.trigger_port = 1;
         } else if (strcmp(trigger, "port2") == 0) {
@@ -340,94 +408,79 @@ static void load_cfg(struct impl* impl) {
             next.trigger_port = 0;
         }
     }
-    next.destination_port     = param_int(impl->params, "DestinationPort", 49000, 1, 65535);
-    next.threshold_db         = param_int(impl->params, "ThresholdDb", -45, -90, 0);
-    next.margin_db            = param_int(impl->params, "MarginDb", 6, 0, 40);
-    next.activation_delay_ms  = param_int(impl->params, "ActivationDelayMs", 200, 0, 10000);
-    next.deactivation_delay_s = param_int(impl->params, "DeactivationDelayS", 2, 0, 60);
-    next.max_on_s             = param_int(impl->params, "MaxOnS", 0, 0, 3600);
-    param_str(impl->params, "DestinationIp", next.destination_ip, sizeof next.destination_ip, "");
-    param_str(impl->params, "InputNode", next.input_node, sizeof next.input_node, DEFAULT_NODE);
+    next.destination_port     = param_int(params, "DestinationPort", 49000, 1, 65535);
+    next.threshold_db         = param_int(params, "ThresholdDb", -45, -90, 0);
+    next.margin_db            = param_int(params, "MarginDb", 6, 0, 40);
+    next.activation_delay_ms  = param_int(params, "ActivationDelayMs", 200, 0, 10000);
+    next.deactivation_delay_s = param_int(params, "DeactivationDelayS", 2, 0, 60);
+    next.max_on_s             = param_int(params, "MaxOnS", 0, 0, 3600);
+    param_str(params, "DestinationIp", next.destination_ip, sizeof next.destination_ip, "");
+    param_str(params, "InputNode", next.input_node, sizeof next.input_node, DEFAULT_NODE);
     if (!valid_node_name(next.input_node)) {
         snprintf(next.input_node, sizeof next.input_node, "%s", DEFAULT_NODE);
     }
     if (next.destination_ip[0] != '\0' && !valid_ipv4(next.destination_ip)) {
-        set_error("Destination IP is not a unicast IPv4 address");
+        snprintf(err, err_len, "Destination IP is not a unicast IPv4 address");
         next.destination_ip[0] = '\0';
     }
-    g_cfg = next;
+    *out = next;
 }
 
-static bool set_param(AXParameter* handle, const char* name, const char* value) {
+static bool set_param(AXParameter* handle, const char* name, const char* value, char* err, size_t err_len) {
     GError* error = NULL;
 
     if (handle == NULL) {
+        snprintf(err, err_len, "Parameters are unavailable");
         return false;
     }
     if (!ax_parameter_set(handle, name, value, TRUE, &error)) {
         syslog(LOG_ERR, "Failed to set %s: %s", name, error != NULL ? error->message : "unknown");
-        if (error != NULL) {
-            snprintf(g_last_error, sizeof g_last_error, "Could not save %s", name);
-        }
+        snprintf(err, err_len, "Could not save %s", name);
         g_clear_error(&error);
         return false;
     }
     return true;
 }
 
-static bool apply_pending(struct impl* impl) {
-    struct cfg cfg;
-    bool have = false;
-    bool have_alarm = false;
-    int alarm_level = -1;
-    char buf[32];
+static bool put_bool(AXParameter* p, const char* name, bool want, bool have, char* err, size_t err_len) {
+    if (want == have) {
+        return true;
+    }
+    return set_param(p, name, want ? "yes" : "no", err, err_len);
+}
 
-    pthread_mutex_lock(&g_mu);
-    if (g_pending.have) {
-        cfg            = g_pending.cfg;
-        g_pending.have = false;
-        have           = true;
+static bool put_int(AXParameter* p, const char* name, int want, int have, char* err, size_t err_len) {
+    char buf[16];
+
+    if (want == have) {
+        return true;
     }
-    if (g_pending.have_alarm) {
-        alarm_level          = g_pending.alarm_level;
-        g_pending.have_alarm = false;
-        have_alarm           = true;
+    snprintf(buf, sizeof buf, "%d", want);
+    return set_param(p, name, buf, err, err_len);
+}
+
+/* Writes the fields that differ from the last values read back. Strings are
+ * always written, because read_cfg() normalises invalid stored strings. */
+static bool write_cfg(AXParameter* p, const struct cfg* want, const struct cfg* have, char* err, size_t err_len) {
+    bool ok = true;
+
+    ok = put_bool(p, "Enabled", want->enabled, have->enabled, err, err_len) && ok;
+    ok = put_bool(p, "ForceOn", want->force_on, have->force_on, err, err_len) && ok;
+    ok = put_bool(p, "TestMode", want->test_mode, have->test_mode, err, err_len) && ok;
+    if (want->trigger_port != have->trigger_port) {
+        ok = set_param(p, "Trigger", trigger_name(want->trigger_port), err, err_len) && ok;
     }
-    pthread_mutex_unlock(&g_mu);
-    if (have_alarm && alarm_level >= 0 && alarm_level <= 100 && alarm_level != g_alarm_level) {
-        g_alarm_level = alarm_level;
-        if (impl->params != NULL) {
-            snprintf(buf, sizeof buf, "%d", alarm_level);
-            set_param(impl->params, "CachedAlarmLevel", buf);
-        }
-        if (strcmp(g_last_error, "Could not read Audio detection level") == 0) {
-            g_last_error[0] = '\0';
-        }
+    ok = set_param(p, "DestinationIp", want->destination_ip, err, err_len) && ok;
+    ok = put_int(p, "DestinationPort", want->destination_port, have->destination_port, err, err_len) && ok;
+    ok = put_int(p, "ThresholdDb", want->threshold_db, have->threshold_db, err, err_len) && ok;
+    ok = put_int(p, "MarginDb", want->margin_db, have->margin_db, err, err_len) && ok;
+    ok = put_int(p, "ActivationDelayMs", want->activation_delay_ms, have->activation_delay_ms, err, err_len) && ok;
+    ok = put_int(p, "DeactivationDelayS", want->deactivation_delay_s, have->deactivation_delay_s, err, err_len) && ok;
+    ok = put_int(p, "MaxOnS", want->max_on_s, have->max_on_s, err, err_len) && ok;
+    if (valid_node_name(want->input_node)) {
+        ok = set_param(p, "InputNode", want->input_node, err, err_len) && ok;
     }
-    if (!have || impl->params == NULL) {
-        return have;
-    }
-    set_param(impl->params, "Enabled", cfg.enabled ? "yes" : "no");
-    set_param(impl->params, "ForceOn", cfg.force_on ? "yes" : "no");
-    set_param(impl->params, "TestMode", cfg.test_mode ? "yes" : "no");
-    set_param(impl->params, "Trigger", cfg.trigger_port == 1 ? "port1" : cfg.trigger_port == 2 ? "port2" : "level");
-    set_param(impl->params, "DestinationIp", cfg.destination_ip);
-    snprintf(buf, sizeof buf, "%d", cfg.destination_port);
-    set_param(impl->params, "DestinationPort", buf);
-    snprintf(buf, sizeof buf, "%d", cfg.threshold_db);
-    set_param(impl->params, "ThresholdDb", buf);
-    snprintf(buf, sizeof buf, "%d", cfg.margin_db);
-    set_param(impl->params, "MarginDb", buf);
-    snprintf(buf, sizeof buf, "%d", cfg.activation_delay_ms);
-    set_param(impl->params, "ActivationDelayMs", buf);
-    snprintf(buf, sizeof buf, "%d", cfg.deactivation_delay_s);
-    set_param(impl->params, "DeactivationDelayS", buf);
-    snprintf(buf, sizeof buf, "%d", cfg.max_on_s);
-    set_param(impl->params, "MaxOnS", buf);
-    if (valid_node_name(cfg.input_node)) {
-        set_param(impl->params, "InputNode", cfg.input_node);
-    }
-    return true;
+    return ok;
 }
 
 static void clear_ring(void) {
@@ -843,29 +896,156 @@ static void publish_status(const char* gate) {
     snprintf(snap.connected_node, sizeof snap.connected_node, "%s", g_impl.connected_name);
     snprintf(snap.last_error, sizeof snap.last_error, "%s", g_last_error);
     snprintf(snap.last_rtp_header, sizeof snap.last_rtp_header, "%s", g_last_rtp_header);
+    snprintf(snap.alarm_source, sizeof snap.alarm_source, "%s", g_alarm_source);
+    snprintf(snap.config_error, sizeof snap.config_error, "%s", g_cfg_save_error);
+    snap.config_rev = g_cfg_rev_applied;
+    snap.hist_seq   = g_hist_seq;
+    snap.hist_count = g_hist_seq < HIST_LEN ? g_hist_seq : HIST_LEN;
+    {
+        unsigned i;
+        uint32_t first = g_hist_seq - snap.hist_count;
+        for (i = 0; i < snap.hist_count; i++) {
+            unsigned idx           = (unsigned)((first + i) % HIST_LEN);
+            snap.hist_level[i]     = g_hist_level[idx];
+            snap.hist_gate[i]      = g_hist_gate[idx];
+            snap.hist_port1[i]     = g_hist_port1[idx];
+            snap.hist_port2[i]     = g_hist_port2[idx];
+        }
+    }
 
     pthread_mutex_lock(&g_mu);
     g_status = snap;
     pthread_mutex_unlock(&g_mu);
 }
 
+/* Codes shared with the settings page: 0 idle, 1 pending, 2 active,
+ * 3 holding, 4 waiting after max-on, 5 test tone. */
+static uint8_t gate_code(const char* gate) {
+    if (strcmp(gate, "pending") == 0) {
+        return 1;
+    }
+    if (strcmp(gate, "active") == 0) {
+        return 2;
+    }
+    if (strcmp(gate, "holding") == 0) {
+        return 3;
+    }
+    if (strcmp(gate, "waiting") == 0) {
+        return 4;
+    }
+    if (strcmp(gate, "test") == 0) {
+        return 5;
+    }
+    return 0;
+}
+
+/* One entry per 100 ms: the peak level seen in that window and the gate state
+ * at its end. The page merges entries by sequence number, so its chart shows
+ * real gate history at a steady rate whatever its polling interval. */
+static void record_history(int64_t now, const char* gate) {
+    unsigned idx;
+    double peak;
+
+    if (g_level_percent > g_hist_peak) {
+        g_hist_peak = g_level_percent;
+    }
+    if (g_hist_next_ms == 0) {
+        g_hist_next_ms = now + HIST_INTERVAL_MS;
+    }
+    if (now < g_hist_next_ms) {
+        return;
+    }
+    peak = g_hist_peak < 0.0 ? 0.0 : g_hist_peak > 100.0 ? 100.0 : g_hist_peak;
+    idx  = (unsigned)(g_hist_seq % HIST_LEN);
+    g_hist_level[idx] = (uint8_t)lrint(peak);
+    g_hist_gate[idx]  = gate_code(gate);
+    g_hist_port1[idx] = (int8_t)port_is_active(1);
+    g_hist_port2[idx] = (int8_t)port_is_active(2);
+    g_hist_seq++;
+    g_hist_peak = 0.0;
+    g_hist_next_ms += HIST_INTERVAL_MS;
+    if (now >= g_hist_next_ms) {
+        g_hist_next_ms = now + HIST_INTERVAL_MS;
+    }
+}
+
+static void take_control_updates(void) {
+    struct ctl_update u;
+
+    pthread_mutex_lock(&g_mu);
+    if (!g_ctl.have_cfg && !g_ctl.have_alarm) {
+        pthread_mutex_unlock(&g_mu);
+        return;
+    }
+    u                = g_ctl;
+    g_ctl.have_cfg   = false;
+    g_ctl.have_alarm = false;
+    pthread_mutex_unlock(&g_mu);
+
+    if (u.have_cfg) {
+        /* The revision and the values it confirms reach /api/status together. */
+        g_cfg             = u.cfg;
+        g_cfg_rev_applied = u.rev;
+        snprintf(g_cfg_save_error, sizeof g_cfg_save_error, "%s", u.save_error);
+        if (u.cfg_error[0] != '\0') {
+            set_error(u.cfg_error);
+        } else if (g_shown_cfg_error[0] != '\0' && strcmp(g_last_error, g_shown_cfg_error) == 0) {
+            g_last_error[0] = '\0';
+        }
+        snprintf(g_shown_cfg_error, sizeof g_shown_cfg_error, "%s", u.cfg_error);
+    }
+    if (u.have_alarm && u.alarm_level >= 0 && u.alarm_level <= 100) {
+        if (u.alarm_level != g_alarm_level) {
+            syslog(LOG_INFO, "Activation level %d (from %s)", u.alarm_level, u.alarm_source);
+        }
+        g_alarm_level = u.alarm_level;
+        snprintf(g_alarm_source, sizeof g_alarm_source, "%s", u.alarm_source);
+    }
+}
+
+static void destroy_stream(struct impl* impl);
+
+/* Stream errors are terminal in PipeWire, so tear the stream down and let
+ * ensure_stream() build a new one after a backoff. Also catches a stream that
+ * stays connected but stops delivering buffers. */
+static void check_capture(struct impl* impl, int64_t now) {
+    if (impl->stream != NULL && !g_stream_failed && now - g_last_process_ms > AUDIO_WATCHDOG_MS) {
+        syslog(LOG_WARNING, "No audio from %s for %d ms, reconnecting", impl->connected_name, AUDIO_WATCHDOG_MS);
+        set_error("No audio from the input, reconnecting");
+        g_stream_failed = true;
+    }
+    if (g_stream_failed) {
+        g_stream_failed = false;
+        destroy_stream(impl);
+        g_retry_at = now + g_retry_ms;
+        syslog(LOG_INFO, "Retrying capture in %d ms", g_retry_ms);
+        g_retry_ms = g_retry_ms * 2 > RETRY_MAX_MS ? RETRY_MAX_MS : g_retry_ms * 2;
+        return;
+    }
+    if (impl->stream != NULL && g_retry_ms != RETRY_MIN_MS && now - g_connected_ms > 10000 &&
+        now - g_last_process_ms < 1000) {
+        g_retry_ms = RETRY_MIN_MS;
+    }
+}
+
 static void on_timeout(void* data, uint64_t expirations) {
     struct impl* impl = data;
     int64_t now;
+    const char* gate;
 
     (void)expirations;
     now = now_ms();
-    if (apply_pending(impl) || now - g_last_cfg_ms >= 1000) {
-        load_cfg(impl);
-        g_last_cfg_ms = now;
-    }
-    ensure_stream(impl);
+    take_control_updates();
+    check_capture(impl, now);
+    ensure_stream(impl, now);
     update_gate();
     if (g_cfg.test_mode && g_streaming) {
         push_test_tone(80);
     }
     drain_audio();
-    publish_status(gate_name());
+    gate = gate_name();
+    record_history(now, gate);
+    publish_status(gate);
 
     if (g_streaming && now - g_last_report_ms >= 10000) {
         g_last_report_ms = now;
@@ -908,8 +1088,15 @@ static void on_state_changed(void* data, enum pw_stream_state old, enum pw_strea
     syslog(LOG_INFO, "PipeWire %s -> %s", pw_stream_state_as_string(old), pw_stream_state_as_string(state));
     if (state == PW_STREAM_STATE_ERROR) {
         syslog(LOG_ERR, "PipeWire stream error: %s", error != NULL ? error : "");
-        set_error("PipeWire stream error");
+        set_error("PipeWire stream error, reconnecting");
         impl->format_ready = false;
+        /* Destroying a stream inside its own callback is not safe. */
+        g_stream_failed = true;
+    } else if (state == PW_STREAM_STATE_STREAMING) {
+        if (strncmp(g_last_error, "PipeWire", 8) == 0 || strncmp(g_last_error, "Input node", 10) == 0 ||
+            strncmp(g_last_error, "No audio", 8) == 0) {
+            g_last_error[0] = '\0';
+        }
     }
 }
 
@@ -989,6 +1176,7 @@ static void on_process(void* data) {
     if (buffer == NULL) {
         return;
     }
+    g_last_process_ms = now_ms();
     if (g_cfg.test_mode) {
         pw_stream_queue_buffer(impl->stream, buffer);
         return;
@@ -1121,6 +1309,8 @@ static void connect_node(struct impl* impl, uint32_t id, const char* name) {
     }
     impl->connected_id = id;
     snprintf(impl->connected_name, sizeof impl->connected_name, "%s", name);
+    g_connected_ms    = now_ms();
+    g_last_process_ms = g_connected_ms;
     syslog(LOG_INFO, "Connecting to input node %s id %u", name, id);
 }
 
@@ -1145,10 +1335,13 @@ static void remember_node(struct impl* impl, uint32_t id, const char* name) {
     snprintf(impl->nodes[free_slot].name, sizeof impl->nodes[free_slot].name, "%s", name);
 }
 
-static void ensure_stream(struct impl* impl) {
+static void ensure_stream(struct impl* impl, int64_t now) {
     unsigned i;
 
     if (impl->stream != NULL && strcmp(impl->connected_name, g_cfg.input_node) == 0) {
+        return;
+    }
+    if (impl->stream == NULL && now < g_retry_at) {
         return;
     }
     for (i = 0; i < NODE_MAX; i++) {
@@ -1217,9 +1410,34 @@ static void on_signal(void* data, int signal_num) {
     pw_main_loop_quit(impl->loop);
 }
 
+/* If the PipeWire daemon goes away the core proxy is dead for good. Exit with
+ * an error so runMode "respawn" starts a fresh process that reconnects. */
+static void on_core_error(void* data, uint32_t id, int seq, int res, const char* message) {
+    struct impl* impl = data;
+
+    (void)seq;
+    syslog(LOG_ERR, "PipeWire error on %u: %s (%d)", id, message != NULL ? message : "", res);
+    if (id == PW_ID_CORE && res == -EPIPE) {
+        syslog(LOG_ERR, "Lost the PipeWire connection, exiting so the app restarts");
+        g_exit_code = EXIT_FAILURE;
+        pw_main_loop_quit(impl->loop);
+    }
+}
+
+static const struct pw_core_events core_events = {
+    PW_VERSION_CORE_EVENTS,
+    .error = on_core_error,
+};
+
 static char* status_json(void) {
     struct status_snap snap;
     json_t* root;
+    json_t* hist;
+    json_t* hist_level;
+    json_t* hist_gate;
+    json_t* hist_port1;
+    json_t* hist_port2;
+    unsigned i;
     char* text;
 
     pthread_mutex_lock(&g_mu);
@@ -1227,6 +1445,27 @@ static char* status_json(void) {
     pthread_mutex_unlock(&g_mu);
 
     root = json_object();
+    json_object_set_new(root, "configRev", json_integer(snap.config_rev));
+    json_object_set_new(root, "configError", json_string(snap.config_error));
+    json_object_set_new(root, "alarmSource", json_string(snap.alarm_source));
+    hist       = json_object();
+    hist_level = json_array();
+    hist_gate  = json_array();
+    hist_port1 = json_array();
+    hist_port2 = json_array();
+    for (i = 0; i < snap.hist_count; i++) {
+        json_array_append_new(hist_level, json_integer(snap.hist_level[i]));
+        json_array_append_new(hist_gate, json_integer(snap.hist_gate[i]));
+        json_array_append_new(hist_port1, json_integer(snap.hist_port1[i]));
+        json_array_append_new(hist_port2, json_integer(snap.hist_port2[i]));
+    }
+    json_object_set_new(hist, "seq", json_integer((json_int_t)snap.hist_seq));
+    json_object_set_new(hist, "intervalMs", json_integer(HIST_INTERVAL_MS));
+    json_object_set_new(hist, "level", hist_level);
+    json_object_set_new(hist, "gate", hist_gate);
+    json_object_set_new(hist, "port1", hist_port1);
+    json_object_set_new(hist, "port2", hist_port2);
+    json_object_set_new(root, "history", hist);
     json_object_set_new(root, "levelDb", json_real(snap.level_db));
     json_object_set_new(root, "levelPercent", json_real(snap.level_percent));
     json_object_set_new(root, "deviceAlarmLevel", json_integer(snap.device_alarm_level));
@@ -1341,6 +1580,7 @@ static char* config_from_body(const char* body, size_t length, int* http_code) {
     json_t* node_value;
     json_t* alarm_value = NULL;
     int posted_alarm    = -1;
+    unsigned rev        = 0;
     bool have_cfg;
     const char* ip;
     const char* node;
@@ -1453,15 +1693,28 @@ static char* config_from_body(const char* body, size_t length, int* http_code) {
     if (have_cfg) {
         g_pending.cfg  = cfg;
         g_pending.have = true;
+        g_pending.rev  = ++g_cfg_rev_requested;
+        rev            = g_pending.rev;
     }
     if (posted_alarm >= 0) {
         g_pending.alarm_level = posted_alarm;
         g_pending.have_alarm  = true;
     }
+    pthread_cond_signal(&g_ctl_cond);
     pthread_mutex_unlock(&g_mu);
 
+    /* "rev" lets the page wait until /api/status reports configRev >= rev,
+     * which means the values were written and read back (or configError). */
     *http_code = 200;
-    text       = json_ok(true, NULL);
+    {
+        json_t* reply = json_object();
+        json_object_set_new(reply, "ok", json_true());
+        if (rev > 0) {
+            json_object_set_new(reply, "rev", json_integer(rev));
+        }
+        text = json_dumps(reply, JSON_COMPACT);
+        json_decref(reply);
+    }
     return text;
 }
 
@@ -1626,6 +1879,249 @@ static int start_http(struct impl* impl) {
     return 0;
 }
 
+/* ---- Control thread: parameters and VAPIX, off the audio loop ---------- */
+
+struct vapix {
+    char* credentials; /* "user:password" from the VAPIX service account */
+    int64_t retry_at;
+    bool warned;
+};
+
+struct http_buf {
+    char data[1024];
+    size_t len;
+};
+
+static size_t http_sink(char* ptr, size_t size, size_t nmemb, void* user) {
+    struct http_buf* buf = user;
+    size_t n             = size * nmemb;
+    size_t room          = sizeof buf->data - 1 - buf->len;
+    size_t take          = n < room ? n : room;
+
+    memcpy(buf->data + buf->len, ptr, take);
+    buf->len += take;
+    buf->data[buf->len] = '\0';
+    return n;
+}
+
+static char* vapix_credentials(void) {
+    GError* error = NULL;
+    GDBusConnection* bus;
+    GVariant* reply;
+    char* out = NULL;
+
+    bus = g_bus_get_sync(G_BUS_TYPE_SYSTEM, NULL, &error);
+    if (bus == NULL) {
+        syslog(LOG_WARNING, "No system bus for VAPIX credentials: %s", error != NULL ? error->message : "unknown");
+        g_clear_error(&error);
+        return NULL;
+    }
+    reply = g_dbus_connection_call_sync(bus, "com.axis.HTTPConf1", "/com/axis/HTTPConf1/VAPIXServiceAccounts1",
+                                        "com.axis.HTTPConf1.VAPIXServiceAccounts1", "GetCredentials",
+                                        g_variant_new("(s)", APP_NAME), G_VARIANT_TYPE("(s)"),
+                                        G_DBUS_CALL_FLAGS_NONE, 5000, NULL, &error);
+    if (reply == NULL) {
+        syslog(LOG_WARNING, "VAPIX credentials unavailable: %s", error != NULL ? error->message : "unknown");
+        g_clear_error(&error);
+    } else {
+        const gchar* text = NULL;
+        g_variant_get(reply, "(&s)", &text);
+        out = g_strdup(text);
+        g_variant_unref(reply);
+    }
+    g_object_unref(bus);
+    return out;
+}
+
+/* Reads the device's Audio detection level (AudioSource.A0.AlarmLevel), so
+ * the level trigger works without anyone opening the settings page. */
+static int vapix_alarm_level(struct vapix* vx) {
+    CURL* curl;
+    CURLcode res;
+    long code = 0;
+    struct http_buf body;
+    const char* hit;
+    int level   = -1;
+    int64_t now = now_ms();
+
+    if (vx->credentials == NULL) {
+        if (now < vx->retry_at) {
+            return -1;
+        }
+        vx->credentials = vapix_credentials();
+        if (vx->credentials == NULL) {
+            vx->retry_at = now + CREDENTIAL_RETRY_MS;
+            return -1;
+        }
+    }
+    curl = curl_easy_init();
+    if (curl == NULL) {
+        return -1;
+    }
+    memset(&body, 0, sizeof body);
+    curl_easy_setopt(curl, CURLOPT_URL, VAPIX_ALARM_URL);
+    curl_easy_setopt(curl, CURLOPT_USERPWD, vx->credentials);
+    curl_easy_setopt(curl, CURLOPT_HTTPAUTH, (long)CURLAUTH_BASIC);
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, http_sink);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 3000L);
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    res = curl_easy_perform(curl);
+    if (res == CURLE_OK) {
+        curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &code);
+    }
+    curl_easy_cleanup(curl);
+    if (res != CURLE_OK || code != 200) {
+        if (!vx->warned) {
+            syslog(LOG_WARNING, "Could not read AlarmLevel over VAPIX: %s, HTTP %ld", curl_easy_strerror(res), code);
+            vx->warned = true;
+        }
+        if (code == 401 || code == 403) {
+            g_free(vx->credentials);
+            vx->credentials = NULL;
+            vx->retry_at    = now + CREDENTIAL_RETRY_MS;
+        }
+        return -1;
+    }
+    hit = strstr(body.data, "AlarmLevel=");
+    if (hit != NULL) {
+        char* end = NULL;
+        long v    = strtol(hit + 11, &end, 10);
+        if (end != hit + 11 && v >= 0 && v <= 100) {
+            level = (int)v;
+        }
+    }
+    if (level >= 0 && vx->warned) {
+        syslog(LOG_INFO, "Reading AlarmLevel over VAPIX again");
+        vx->warned = false;
+    }
+    return level;
+}
+
+static void publish_alarm(int level, const char* source) {
+    pthread_mutex_lock(&g_mu);
+    g_ctl.have_alarm  = true;
+    g_ctl.alarm_level = level;
+    snprintf(g_ctl.alarm_source, sizeof g_ctl.alarm_source, "%s", source);
+    pthread_mutex_unlock(&g_mu);
+}
+
+static void persist_alarm(AXParameter* params, int level, int* persisted) {
+    char buf[16];
+    char err[160];
+
+    if (params == NULL || level == *persisted) {
+        return;
+    }
+    snprintf(buf, sizeof buf, "%d", level);
+    if (set_param(params, "CachedAlarmLevel", buf, err, sizeof err)) {
+        *persisted = level;
+    }
+}
+
+static void deadline_in(struct timespec* ts, int64_t ms) {
+    if (ms < 0) {
+        ms = 0;
+    }
+    clock_gettime(CLOCK_MONOTONIC, ts);
+    ts->tv_sec += (time_t)(ms / 1000);
+    ts->tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (ts->tv_nsec >= 1000000000L) {
+        ts->tv_sec++;
+        ts->tv_nsec -= 1000000000L;
+    }
+}
+
+static void* control_thread(void* arg) {
+    struct impl* impl  = arg;
+    struct vapix vx    = {NULL, 0, false};
+    struct cfg current;
+    char err[160];
+    int64_t next_load  = 0;
+    int64_t next_alarm = 0;
+    int persisted      = impl->params != NULL ? param_int(impl->params, "CachedAlarmLevel", -1, -1, 100) : -1;
+
+    read_cfg(impl->params, &current, err, sizeof err);
+    pthread_mutex_lock(&g_mu);
+    while (!g_ctl_stop) {
+        struct pending_cfg job;
+        int64_t now = now_ms();
+        bool save_ok = true;
+        char save_err[160];
+
+        if (!g_pending.have && !g_pending.have_alarm && now < next_load && now < next_alarm) {
+            struct timespec ts;
+            deadline_in(&ts, (next_load < next_alarm ? next_load : next_alarm) - now);
+            pthread_cond_timedwait(&g_ctl_cond, &g_mu, &ts);
+            continue;
+        }
+        job                  = g_pending;
+        g_pending.have       = false;
+        g_pending.have_alarm = false;
+        pthread_mutex_unlock(&g_mu);
+
+        save_err[0] = '\0';
+        if (job.have) {
+            save_ok = write_cfg(impl->params, &job.cfg, &current, save_err, sizeof save_err);
+        }
+        if (job.have_alarm) {
+            persist_alarm(impl->params, job.alarm_level, &persisted);
+            publish_alarm(job.alarm_level, "page");
+        }
+        if (job.have || now >= next_load) {
+            read_cfg(impl->params, &current, err, sizeof err);
+            next_load = now_ms() + CFG_RELOAD_MS;
+            pthread_mutex_lock(&g_mu);
+            g_ctl.cfg      = current;
+            g_ctl.have_cfg = true;
+            snprintf(g_ctl.cfg_error, sizeof g_ctl.cfg_error, "%s", err);
+            if (job.have) {
+                g_ctl.rev = job.rev;
+                snprintf(g_ctl.save_error, sizeof g_ctl.save_error, "%s", save_ok ? "" : save_err);
+            }
+            pthread_mutex_unlock(&g_mu);
+        }
+        if (now >= next_alarm) {
+            int level  = vapix_alarm_level(&vx);
+            next_alarm = now_ms() + ALARM_POLL_MS;
+            if (level >= 0) {
+                persist_alarm(impl->params, level, &persisted);
+                publish_alarm(level, "device");
+            }
+        }
+        pthread_mutex_lock(&g_mu);
+    }
+    pthread_mutex_unlock(&g_mu);
+    g_free(vx.credentials);
+    return NULL;
+}
+
+static int start_control(struct impl* impl) {
+    pthread_condattr_t attr;
+
+    pthread_condattr_init(&attr);
+    pthread_condattr_setclock(&attr, CLOCK_MONOTONIC);
+    pthread_cond_init(&g_ctl_cond, &attr);
+    pthread_condattr_destroy(&attr);
+    if (pthread_create(&impl->control_thread, NULL, control_thread, impl) != 0) {
+        return -1;
+    }
+    impl->control_started = true;
+    return 0;
+}
+
+static void stop_control(struct impl* impl) {
+    if (!impl->control_started) {
+        return;
+    }
+    pthread_mutex_lock(&g_mu);
+    g_ctl_stop = true;
+    pthread_cond_signal(&g_ctl_cond);
+    pthread_mutex_unlock(&g_mu);
+    pthread_join(impl->control_thread, NULL);
+    impl->control_started = false;
+}
+
 static void shutdown_app(struct impl* impl) {
     if (g_event_started) {
         while (g_atomic_int_get(&g_event_ready) == 0) {
@@ -1645,6 +2141,7 @@ static void shutdown_app(struct impl* impl) {
         close(fd);
         pthread_join(impl->http_thread, NULL);
     }
+    stop_control(impl);
     if (g_rtp_fd >= 0) {
         close(g_rtp_fd);
         g_rtp_fd = -1;
@@ -1657,6 +2154,10 @@ static void shutdown_app(struct impl* impl) {
     if (impl->registry != NULL) {
         pw_proxy_destroy((struct pw_proxy*)impl->registry);
         impl->registry = NULL;
+    }
+    if (impl->core_hooked) {
+        spa_hook_remove(&impl->core_listener);
+        impl->core_hooked = false;
     }
     if (impl->core != NULL) {
         pw_core_disconnect(impl->core);
@@ -1678,6 +2179,7 @@ static void shutdown_app(struct impl* impl) {
         ax_parameter_free(impl->params);
         impl->params = NULL;
     }
+    curl_global_cleanup();
     closelog();
 }
 
@@ -1686,9 +2188,11 @@ int main(int argc, char* argv[]) {
     struct pw_loop* loop;
     struct timespec interval;
     GError* error = NULL;
+    char cfg_err[160];
     int res;
 
     openlog(APP_NAME, LOG_PID, LOG_USER);
+    curl_global_init(CURL_GLOBAL_DEFAULT);
     memset(impl, 0, sizeof *impl);
     impl->http_listen_fd = -1;
     g_seq                = (uint16_t)(now_ms() & 0xFFFF);
@@ -1700,16 +2204,18 @@ int main(int argc, char* argv[]) {
         syslog(LOG_ERR, "AXParameter failed: %s", error != NULL ? error->message : "unknown");
         g_clear_error(&error);
     }
-    load_cfg(impl);
-    g_last_cfg_ms = now_ms();
-    publish_status("inactive");
-
+    read_cfg(impl->params, &g_cfg, cfg_err, sizeof cfg_err);
+    if (cfg_err[0] != '\0') {
+        set_error(cfg_err);
+    }
     {
         int cached = impl->params != NULL ? param_int(impl->params, "CachedAlarmLevel", -1, -1, 100) : -1;
         if (cached >= 0) {
             g_alarm_level = cached;
+            snprintf(g_alarm_source, sizeof g_alarm_source, "cached");
         }
     }
+    publish_status("inactive");
 
     setenv("PIPEWIRE_DEBUG", "2", 1);
     pw_init(&argc, &argv);
@@ -1731,6 +2237,8 @@ int main(int argc, char* argv[]) {
         shutdown_app(impl);
         return EXIT_FAILURE;
     }
+    pw_core_add_listener(impl->core, &impl->core_listener, &core_events, impl);
+    impl->core_hooked = true;
     impl->registry = pw_core_get_registry(impl->core, PW_VERSION_REGISTRY, 0);
     if (impl->registry == NULL) {
         syslog(LOG_ERR, "Could not open the PipeWire registry");
@@ -1750,6 +2258,11 @@ int main(int argc, char* argv[]) {
         shutdown_app(impl);
         return EXIT_FAILURE;
     }
+    if (start_control(impl) != 0) {
+        syslog(LOG_ERR, "Could not start the control thread");
+        shutdown_app(impl);
+        return EXIT_FAILURE;
+    }
     if (start_http(impl) != 0) {
         syslog(LOG_ERR, "Continuing without the status server");
     }
@@ -1759,11 +2272,11 @@ int main(int argc, char* argv[]) {
         syslog(LOG_ERR, "Input events unavailable");
     }
 
-    syslog(LOG_INFO, "Line Input RTP started. Node %s, threshold %d dBFS, codec PCMA/8000 payload 8",
-           g_cfg.input_node, g_cfg.threshold_db);
+    syslog(LOG_INFO, "Line Input RTP started. Node %s, activation level %d (%s), codec PCMA/8000 payload 8",
+           g_cfg.input_node, g_alarm_level, g_alarm_source);
     pw_main_loop_run(impl->loop);
 
     syslog(LOG_INFO, "Line Input RTP stopped");
     shutdown_app(impl);
-    return EXIT_SUCCESS;
+    return g_exit_code;
 }

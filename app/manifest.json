@@ -5,16 +5,21 @@
             "user": {
                 "groups": ["pipewire"]
             }
+        },
+        "dbus": {
+            "requiredMethods": [
+                "com.axis.HTTPConf1.VAPIXServiceAccounts1.GetCredentials"
+            ]
         }
     },
     "acapPackageConf": {
         "setup": {
             "friendlyName": "Line Input RTP",
             "appName": "lineinrtp",
-            "vendor": "mrdnlabs.pro",
-            "vendorId": "4E49414E47",
+            "vendor": "dnicholl.axis@gmail.com",
+            "vendorId": "6ee443117c",
             "runMode": "respawn",
-            "version": "1.4.1",
+            "version": "1.5.0",
             "compatibleOsVersions": [
                 {
                     "min": "12.11.72",

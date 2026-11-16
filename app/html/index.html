@@ -7,431 +7,743 @@
   <style>
     :root {
       color-scheme: light;
-      --ink: #1c1b17;
-      --muted: #5e584e;
-      --line: #e4dfd4;
-      --paper: #f6f4ef;
-      --card: #fffcf7;
-      --gold: #e2b100;
-      --gold-ink: #3d3200;
-      --on: #0e6b45;
-      --wait: #8a5a00;
-      --test: #2d4f86;
+      --bg: #f4f5f7;
+      --surface: #ffffff;
+      --sunken: #fafbfc;
+      --line: #e3e6eb;
+      --line-soft: #eef0f3;
+      --control: #d5d9e0;
+      --ink: #12161c;
+      --ink-2: #3b4452;
+      --muted: #5b6472;
+      --accent: #1f5fd6;
+      --accent-ink: #1a4fb5;
+      --accent-soft: #e6eefc;
+      --thr: #c2410c;
+      --thr-ink: #9a3412;
+      --rel: #e8935f;
+      --bad: #b42318;
+      --warn-bg: #fdf1ea;
+      --warn-line: #f3c9b0;
+      --warn-ink: #7a2a08;
+      /* Timeline lanes: green sending, yellow opening/holding, red blocked. */
+      --lane-send: #2e9e5b;
+      --lane-hold: #e0a800;
+      --lane-open: #f5e09a;
+      --lane-wait: #d64545;
+      --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      background: var(--paper);
-      color: var(--ink);
-      font: 15px/1.45 "Segoe UI", sans-serif;
-    }
-    main { max-width: 880px; margin: 0 auto; padding: 28px 18px 56px; }
-    h1 { font-size: 1.45rem; font-weight: 650; margin: 0; letter-spacing: -0.02em; }
-    .lede { margin: 6px 0 0; color: var(--muted); max-width: 40rem; }
-    .card {
-      background: var(--card);
-      border: 1px solid var(--line);
-      border-radius: 16px;
-      padding: 16px 18px 18px;
-      margin-top: 14px;
-    }
-    .kicker {
-      margin: 0 0 10px;
-      font-size: 0.72rem;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      color: var(--muted);
-      font-weight: 650;
-    }
-    .urlrow { display: flex; gap: 8px; align-items: stretch; }
-    .urlrow code {
-      flex: 1;
-      font-family: ui-monospace, monospace;
-      font-size: 0.92rem;
-      background: #f3f0e8;
-      border-radius: 10px;
-      padding: 10px 12px;
-      overflow-wrap: anywhere;
-    }
-    button {
-      border: 1px solid var(--line);
-      background: #fff;
-      border-radius: 10px;
-      padding: 8px 14px;
-      font: inherit;
-      cursor: pointer;
-    }
-    button.primary { background: var(--gold); border-color: #c99a00; color: var(--gold-ink); font-weight: 650; }
-    button:disabled { opacity: 0.45; cursor: default; }
-    .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-top: 14px; }
-    .stat span { display: block; color: var(--muted); font-size: 0.75rem; }
-    .stat strong { font-size: 1.05rem; font-weight: 650; }
-    .pill {
-      display: inline-block;
-      border-radius: 999px;
-      padding: 2px 8px;
-      background: #ece8df;
-      font-size: 0.92rem;
-    }
-    .pill.active, .pill.holding { background: #d9f3e6; color: var(--on); }
-    .pill.pending, .pill.waiting { background: #fff1cc; color: var(--wait); }
-    .pill.test { background: #e4ecf8; color: var(--test); }
-    .meterwrap { margin-top: 14px; }
-    .meter {
-      position: relative;
-      height: 18px;
-      border-radius: 9px;
-      background: linear-gradient(#f3f0e8, #f3f0e8) padding-box;
-      overflow: hidden;
-      border: 1px solid var(--line);
-    }
-    .meter > .fill { height: 100%; width: 0; background: #243044; }
-    .meter > .mark {
-      position: absolute;
-      top: -5px;
-      bottom: -5px;
-      width: 2px;
-      background: var(--gold);
-      border-radius: 1px;
-    }
-    .scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 0.72rem; margin-top: 4px; }
-    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-    label { display: block; margin: 0 0 12px; color: var(--muted); font-size: 0.86rem; }
-    select, input[type="text"], input[type="number"] {
-      display: block;
-      width: 100%;
-      margin-top: 4px;
-      padding: 8px 10px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: #fff;
-      color: var(--ink);
-      font: inherit;
-    }
-    .checks { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
-    .checks label { margin: 0; color: var(--ink); display: flex; gap: 8px; align-items: flex-start; }
-    .levelread {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: baseline;
-      padding: 10px 12px;
-      border-radius: 12px;
-      background: #fff8e1;
-      border: 1px solid #f0e0a4;
-      margin-bottom: 12px;
-    }
-    .levelread strong { font-size: 1.6rem; letter-spacing: -0.03em; }
-    .levelread p { margin: 2px 0 0; }
-    svg.story { width: 100%; height: auto; display: block; }
-    .storytext { margin: 8px 0 0; color: var(--ink); }
-    .actions { display: flex; align-items: center; gap: 10px; }
-    .note { color: var(--muted); font-size: 0.88rem; }
-    .error { color: #8d1d18; min-height: 1.2em; }
-    details { margin-top: 8px; }
-    summary { cursor: pointer; color: var(--muted); }
-    @media (max-width: 720px) {
-      .stats, .grid { grid-template-columns: 1fr 1fr; }
-      .grid { grid-template-columns: 1fr; }
+    body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 Inter, "Segoe UI", system-ui, sans-serif; }
+    button, input { font: inherit; }
+    button { cursor: pointer; }
+    button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    [hidden] { display: none !important; }
+
+    header { background: var(--surface); border-bottom: 1px solid var(--line); }
+    .bar { max-width: 1120px; margin: 0 auto; padding: 14px 24px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; }
+    .brand { display: flex; align-items: center; gap: 12px; flex: 1 1 260px; min-width: 0; }
+    .logo { width: 36px; height: 36px; border-radius: 10px; background: var(--ink); display: grid; place-items: center; flex: none; }
+    h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
+    .sub { font-size: 12.5px; color: var(--muted); }
+    .chip { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 999px; font-size: 13px; font-weight: 600; background: var(--line-soft); color: var(--ink-2); }
+    .chip i { width: 8px; height: 8px; border-radius: 50%; background: #8a93a1; }
+    .chip.send { background: #e3f4ea; color: #1d6b3d; } .chip.send i { background: var(--lane-send); box-shadow: 0 0 0 4px rgba(46,158,91,.2); }
+    .chip.hold { background: #fbf2d3; color: #7a5a00; } .chip.hold i { background: var(--lane-hold); }
+    .chip.wait, .chip.lost { background: var(--warn-bg); color: var(--thr-ink); } .chip.wait i, .chip.lost i { background: var(--lane-wait); }
+    .savebox { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
+    .btn { height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--control); background: var(--surface); color: var(--ink); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    .btn:disabled { opacity: .5; cursor: default; }
+    .btn.small { height: 30px; padding: 0 10px; font-size: 12.5px; }
+    .saveerr { color: var(--bad); }
+
+    main { max-width: 1120px; margin: 0 auto; padding: 20px 24px 56px; display: flex; flex-direction: column; gap: 16px; }
+    .card { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+    h2 { margin: 0; font-size: 15px; font-weight: 600; }
+    .notice { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: 10px; background: var(--warn-bg); border: 1px solid var(--warn-line); color: var(--warn-ink); font-size: 13.5px; }
+
+    .charthead { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; }
+    .charthead .t { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+    .legend { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--ink-2); }
+    .legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .sw { display: inline-block; width: 12px; height: 10px; border-radius: 2px; }
+    .ln { display: inline-block; width: 16px; border-top: 2px solid var(--thr); }
+    .ln.dash { border-top: 2px dashed var(--rel); }
+    .ln.port { border-top-color: var(--accent); }
+    .chart { display: flex; gap: 10px; }
+    .yaxis { display: flex; flex-direction: column; justify-content: space-between; height: 220px; font: 11px var(--mono); color: var(--muted); text-align: right; width: 26px; flex: none; }
+    .plotcol { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
+    .plot { position: relative; height: 220px; border-radius: 8px; background: var(--sunken); border: 1px solid var(--line-soft); overflow: hidden; }
+    .plot svg { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .shade { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .08; }
+    .hline { position: absolute; left: 0; right: 0; border-top: 2px solid var(--thr); }
+    .hline.rel { border-top: 2px dashed var(--rel); }
+    .mid { position: absolute; left: 0; right: 0; top: 50%; border-top: 1px solid var(--line-soft); }
+    .tag { position: absolute; right: 8px; font-size: 11.5px; font-weight: 600; color: var(--thr-ink); background: var(--surface); border-radius: 4px; padding: 1px 6px; }
+    .lane { display: flex; align-items: center; gap: 10px; }
+    .track { position: relative; flex: 1 1 auto; height: 14px; border-radius: 4px; background: var(--line-soft); overflow: hidden; }
+    .track div { position: absolute; top: 0; bottom: 0; }
+    .lane > span { width: 64px; flex: none; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+    .lane.preview > span { color: var(--accent-ink); }
+    .xaxis { display: flex; justify-content: space-between; font: 11px var(--mono); color: var(--muted); padding-right: 74px; }
+    .caption { margin: 0; font-size: 13px; color: var(--ink-2); }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; }
+    .stat { background: var(--surface); padding: 10px 14px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .stat span { font-size: 12px; color: var(--muted); }
+    .stat strong { font: 500 17px var(--mono); }
+    .stat small { font-size: 11.5px; color: var(--muted); overflow-wrap: anywhere; }
+
+    .cols { display: flex; flex-wrap: wrap; gap: 16px; align-items: flex-start; }
+    .colmain { flex: 999 1 560px; padding-bottom: 8px; }
+    .colside { flex: 1 1 300px; min-width: 0; display: flex; flex-direction: column; gap: 16px; }
+    .field { display: flex; flex-direction: column; gap: 8px; }
+    .flabel { font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+    .help { margin: 0; font-size: 13px; color: var(--muted); }
+    .seg { display: grid; gap: 4px; padding: 4px; background: var(--line-soft); border-radius: 10px; }
+    .seg.n4 { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .seg.n3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .seg button { height: 36px; border: 0; border-radius: 7px; font-size: 13.5px; font-weight: 500; background: transparent; color: var(--ink-2); padding: 0 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .seg button[aria-pressed="true"] { background: var(--surface); color: var(--ink); font-weight: 600; box-shadow: 0 1px 2px rgba(18,22,28,.12), 0 0 0 1px rgba(18,22,28,.06); }
+    .slider { display: flex; flex-direction: column; gap: 4px; padding: 12px 0; border-top: 1px solid var(--line-soft); }
+    .slider .top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .slider label { font-weight: 600; }
+    .slider .num { display: flex; align-items: center; gap: 6px; }
+    .slider .num span { font-size: 12.5px; color: var(--muted); width: 22px; }
+    input[type=range] { width: 100%; accent-color: var(--accent); height: 28px; margin: 0; cursor: pointer; }
+    input[type=number], input[type=text] { height: 38px; padding: 0 10px; border: 1px solid var(--control); border-radius: 8px; font: 13.5px var(--mono); color: var(--ink); background: var(--surface); outline: none; width: 100%; }
+    .slider input[type=number] { width: 76px; height: 32px; padding: 0 8px; text-align: right; font-size: 13px; }
+    input:focus { border-color: var(--accent); }
+    input[aria-invalid="true"] { border-color: var(--bad); }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; }
+    .row label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; font-weight: 600; color: var(--ink-2); }
+    .err { margin: -6px 0 0; font-size: 12.5px; color: var(--bad); }
+    .urlrow { display: flex; gap: 8px; }
+    code { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; font: 13px var(--mono); background: var(--bg); border: 1px solid var(--line-soft); border-radius: 8px; padding: 9px 10px; }
+    dl { margin: 0; display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13px; }
+    dt { color: var(--muted); }
+    dd { margin: 0; overflow-wrap: anywhere; }
+    dd.mono { font-family: var(--mono); }
+    details.card { padding: 4px 20px; gap: 0; }
+    summary { cursor: pointer; padding: 14px 0; font-size: 15px; font-weight: 600; }
+    details .inner { display: flex; flex-direction: column; gap: 14px; padding: 0 0 18px; }
+    @media (max-width: 560px) {
+      .bar, main { padding-left: 16px; padding-right: 16px; }
+      .seg.n4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .xaxis span:nth-child(2), .xaxis span:nth-child(4) { visibility: hidden; }
     }
   </style>
 </head>
 <body>
-<main>
-  <h1>Line Input RTP</h1>
-  <p class="lede">The line input is sent as G.711 A-law while it stays above the audio-detection level on this device.</p>
-
-  <section class="card">
-    <p class="kicker">Stream</p>
-    <div class="urlrow">
-      <code id="streamUrl">Set a destination address</code>
-      <button type="button" id="copyUrl">Copy</button>
-    </div>
-    <div class="stats">
-      <div class="stat"><span>Gate</span><strong class="pill" id="gate">—</strong></div>
-      <div class="stat"><span>Input level</span><strong id="level">—</strong></div>
-      <div class="stat"><span>Packets sent</span><strong id="packets">0</strong></div>
-      <div class="stat"><span>Send errors</span><strong id="errors">0</strong></div>
-    </div>
-    <div class="meterwrap">
-      <div class="meter" aria-hidden="true">
-        <div class="fill" id="bar"></div>
-        <div class="mark" id="mark"></div>
+<header>
+  <div class="bar">
+    <div class="brand">
+      <div class="logo" aria-hidden="true">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round"><path d="M3 12h2M7 8v8M11 5v14M15 9v6M19 11v2"/></svg>
       </div>
-      <div class="scale"><span>0 quiet</span><span id="markLabel">Audio detection</span><span>100 full</span></div>
+      <div>
+        <h1>Line Input RTP</h1>
+        <div class="sub">Line input to G.711 A-law RTP</div>
+      </div>
     </div>
-    <p class="error" id="lasterror"></p>
-    <p class="note" id="capture"></p>
+    <div class="chip" id="chip" role="status" aria-live="polite"><i></i><span id="chipText">Connecting…</span></div>
+    <div class="savebox">
+      <span id="saveState">All changes saved</span>
+      <button type="button" class="btn" id="discard" hidden>Discard</button>
+      <button type="button" class="btn primary" id="save" hidden>Save changes</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div id="notices"></div>
+
+  <section class="card" aria-labelledby="chartTitle">
+    <div class="charthead">
+      <div class="t">
+        <h2 id="chartTitle">Input level</h2>
+        <span class="sub">Last 24 seconds</span>
+      </div>
+      <div class="legend">
+        <span><i class="sw" style="background:#3b4452;opacity:.55"></i>Input level</span>
+        <span data-show="level"><i class="ln"></i>Opens</span>
+        <span data-show="level"><i class="ln dash"></i>Closes</span>
+        <span data-show="port"><i class="ln port"></i><b id="portLegend" style="font-weight:400">I/O port</b></span>
+        <span><i class="sw" style="background:var(--lane-send)"></i>Sending</span>
+        <span><i class="sw" style="background:var(--lane-hold)"></i>Holding</span>
+        <span><i class="sw" style="background:var(--lane-open)"></i>Opening</span>
+        <span><i class="sw" style="background:var(--lane-wait)"></i>Max on</span>
+        <button type="button" class="btn small" id="pause" aria-pressed="false">Pause</button>
+      </div>
+    </div>
+    <div class="chart">
+      <div class="yaxis" aria-hidden="true"><span>100</span><span>50</span><span>0</span></div>
+      <div class="plotcol">
+        <div class="plot">
+          <div id="shade"></div>
+          <div class="mid" aria-hidden="true"></div>
+          <svg viewBox="0 0 1000 200" preserveAspectRatio="none" role="img" id="plotSvg" aria-label="Input level over the last 24 seconds">
+            <path id="area" fill="#3b4452" fill-opacity="0.10"></path>
+            <path id="trace" fill="none" stroke="#3b4452" stroke-width="1.5" stroke-linejoin="round" vector-effect="non-scaling-stroke"></path>
+            <path id="portTrace" fill="none" stroke="#1f5fd6" stroke-width="2" vector-effect="non-scaling-stroke"></path>
+          </svg>
+          <div data-show="level" class="hline rel" id="relLine" aria-hidden="true"></div>
+          <div data-show="level" class="hline" id="thrLine" aria-hidden="true"></div>
+          <span data-show="level" class="tag" id="thrTag" aria-hidden="true" style="transform:translateY(-100%);margin-top:-3px"></span>
+          <span data-show="level" class="tag" id="relTag" aria-hidden="true" style="margin-top:4px;font-weight:500"></span>
+        </div>
+        <div class="lane"><div class="track" id="laneSent" role="img"></div><span id="laneSentLabel">Sent</span></div>
+        <div class="lane preview" id="previewRow" hidden><div class="track" id="lanePreview" role="img"></div><span>Preview</span></div>
+        <div class="xaxis" aria-hidden="true"><span>−24 s</span><span>−18 s</span><span>−12 s</span><span>−6 s</span><span>now</span></div>
+      </div>
+    </div>
+    <p class="caption" id="caption"></p>
+    <div class="stats">
+      <div class="stat"><span>Input peak</span><strong id="stLevel">—</strong><small id="stLevelDb"></small></div>
+      <div class="stat"><span>Packets sent</span><strong id="stPackets">0</strong><small>50 per second while sending</small></div>
+      <div class="stat"><span>Send errors</span><strong id="stErrors">0</strong><small>Since start</small></div>
+      <div class="stat"><span>Samples dropped</span><strong id="stDropped">0</strong><small>Buffer overruns</small></div>
+      <div class="stat"><span>Capture</span><strong id="stCapture">—</strong><small id="stCaptureSub"></small></div>
+    </div>
   </section>
 
-  <form id="form">
-    <div class="grid">
-      <section class="card">
-        <p class="kicker">Where it goes</p>
-        <div class="checks">
-          <label><input type="checkbox" id="enabled"> Enabled</label>
-          <label><input type="checkbox" id="testMode"> Test tone instead of the line input</label>
-          <label><input type="checkbox" id="forceOn"> Send the line input even when it is quiet</label>
+  <div class="cols">
+    <section class="card colmain" aria-labelledby="sendTitle">
+      <h2 id="sendTitle">When to send</h2>
+      <div class="field">
+        <span class="flabel" id="modeLabel">Mode</span>
+        <div class="seg n4" role="group" aria-labelledby="modeLabel" id="modes">
+          <button type="button" data-v="off">Off</button>
+          <button type="button" data-v="auto">Auto</button>
+          <button type="button" data-v="always">Always on</button>
+          <button type="button" data-v="test">Test tone</button>
         </div>
-        <label>Audio Manager Pro address
-          <input id="destinationIp" type="text" inputmode="decimal" autocomplete="off" placeholder="192.168.1.10">
-        </label>
-        <label>Listening port
-          <input id="destinationPort" type="number" min="1" max="65535">
-        </label>
-      </section>
-
-      <section class="card">
-        <p class="kicker">When it opens and closes</p>
-        <label>Stream is active when
-          <select id="trigger">
-            <option value="level">Audio level</option>
-            <option value="port1">Port 1</option>
-            <option value="port2">Port 2</option>
-          </select>
-        </label>
-        <div class="levelread">
-          <div>
-            <span class="note" id="triggerLabel">Activation level</span>
-            <p id="triggerNote">Taken from Audio detection on this device.</p>
-          </div>
-          <strong id="alarmShown">—</strong>
-        </div>
-        <label>Activation delay (ms)
-          <input id="activationDelayMs" type="number" min="0" max="10000">
-        </label>
-        <label>Quiet hold before stop (seconds)
-          <input id="deactivationDelayS" type="number" min="0" max="60">
-        </label>
-        <label>Maximum on time, 0 for no limit (seconds)
-          <input id="maxOnS" type="number" min="0" max="3600">
-        </label>
-        <label>Release margin (dB under the device level)
-          <input id="marginDb" type="number" min="0" max="40">
-        </label>
-      </section>
-    </div>
-
-    <section class="card">
-      <p class="kicker">How those times shape the output</p>
-      <svg class="story" id="diagram" viewBox="0 0 640 168" role="img" aria-labelledby="diagramText"></svg>
-      <p class="storytext" id="diagramText"></p>
-      <div class="actions">
-        <button class="primary" type="submit">Save</button>
-        <span id="saveMsg"></span>
+        <p class="help" id="modeHelp"></p>
       </div>
-      <details>
-        <summary>Input node</summary>
-        <label>PipeWire node
-          <input id="inputNode" type="text" autocomplete="off">
-        </label>
-        <p class="note">The usual line input is AudioDevice0Input0.Unprocessed. Gain and the detection slider live on the device Audio detection page.</p>
-      </details>
+      <div class="field" id="triggerField">
+        <span class="flabel" id="trigLabel">Trigger</span>
+        <div class="seg n3" role="group" aria-labelledby="trigLabel" id="triggers">
+          <button type="button" data-v="level">Audio level</button>
+          <button type="button" data-v="port1">I/O port 1</button>
+          <button type="button" data-v="port2">I/O port 2</button>
+        </div>
+        <p class="help" id="trigHelp"></p>
+      </div>
+      <div>
+        <div class="slider" data-key="level" data-min="0" data-max="100">
+          <div class="top"><label for="sLevel">Activation level</label><span class="num"><input type="number" min="0" max="100" step="1" aria-label="Activation level, exact value"><span></span></span></div>
+          <input id="sLevel" type="range" min="0" max="100" step="1">
+          <p class="help">The same setting as Audio detection on the device. Changing it here changes it there.</p>
+        </div>
+        <div class="slider" data-key="margin" data-min="0" data-max="40">
+          <div class="top"><label for="sMargin">Release margin</label><span class="num"><input type="number" min="0" max="40" step="1" aria-label="Release margin, exact value"><span>dB</span></span></div>
+          <input id="sMargin" type="range" min="0" max="40" step="1">
+          <p class="help" data-help="margin"></p>
+        </div>
+        <div class="slider" data-key="delay" data-min="0" data-max="10000">
+          <div class="top"><label for="sDelay">Activation delay</label><span class="num"><input type="number" min="0" max="10000" step="50" aria-label="Activation delay, exact value"><span>ms</span></span></div>
+          <input id="sDelay" type="range" min="0" max="2000" step="50">
+          <p class="help">How long the trigger must stay active before sending starts. Audio from this window is sent too.</p>
+        </div>
+        <div class="slider" data-key="hold" data-min="0" data-max="60">
+          <div class="top"><label for="sHold">Release hold</label><span class="num"><input type="number" min="0" max="60" step="1" aria-label="Release hold, exact value"><span>s</span></span></div>
+          <input id="sHold" type="range" min="0" max="15" step="1">
+          <p class="help" data-help="hold"></p>
+        </div>
+        <div class="slider" data-key="maxOn" data-min="0" data-max="3600">
+          <div class="top"><label for="sMax">Maximum on time</label><span class="num"><input type="number" min="0" max="3600" step="1" aria-label="Maximum on time, exact value"><span>s</span></span></div>
+          <input id="sMax" type="range" min="0" max="120" step="1">
+          <p class="help" data-help="maxOn"></p>
+        </div>
+        <p class="help" id="noTiming" style="padding:12px 0 10px;border-top:1px solid var(--line-soft)">Trigger and timing settings apply in Auto mode.</p>
+      </div>
     </section>
-  </form>
+
+    <div class="colside">
+      <section class="card" aria-labelledby="destTitle">
+        <h2 id="destTitle">Destination</h2>
+        <div class="row">
+          <label style="flex:3 1 150px">Receiver IP address
+            <input type="text" id="ip" inputmode="decimal" autocomplete="off" spellcheck="false" placeholder="192.168.1.10">
+          </label>
+          <label style="flex:1 1 90px">UDP port
+            <input type="number" id="port" min="1" max="65535">
+          </label>
+        </div>
+        <p class="err" id="ipErr" hidden>Use a unicast IPv4 address, such as 192.168.1.10. Multicast and broadcast are not sent.</p>
+        <div class="field" style="gap:6px">
+          <span class="flabel">Source URL for Audio Manager Pro</span>
+          <div class="urlrow">
+            <code id="url">Set a receiver address</code>
+            <button type="button" class="btn" id="copy">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg><span>Copy</span>
+            </button>
+          </div>
+        </div>
+        <dl>
+          <dt>Codec</dt><dd>G.711 A-law (PCMA)</dd>
+          <dt>Payload type</dt><dd>8</dd>
+          <dt>Format</dt><dd>8 kHz mono, 20 ms packets</dd>
+        </dl>
+      </section>
+
+      <details class="card">
+        <summary>Advanced and diagnostics</summary>
+        <div class="inner">
+          <div class="row"><label style="flex:1 1 100%">PipeWire input node
+            <input type="text" id="node" autocomplete="off" spellcheck="false">
+          </label></div>
+          <dl>
+            <dt>Capture</dt><dd id="dCapture">—</dd>
+            <dt>Buffered</dt><dd class="mono" id="dBuffered">0</dd>
+            <dt>Last RTP header</dt><dd class="mono" id="dHeader">—</dd>
+            <dt>Level source</dt><dd id="dSource">—</dd>
+            <dt>Last error</dt><dd id="dError">None</dd>
+          </dl>
+        </div>
+      </details>
+    </div>
+  </div>
 </main>
+
 <script>
-const numeric = {
-  destinationPort: 1,
-  marginDb: 1,
-  activationDelayMs: 1,
-  deactivationDelayS: 1,
-  maxOnS: 1
-};
+"use strict";
+const $ = (id) => document.getElementById(id);
+const N = 240;            /* chart window, 100 ms per entry */
+const KEEP = 360;         /* extra history so the preview has warm-up */
+const POLL_MS = 250;
+const GATE = ["idle", "pending", "on", "holding", "waiting", "test"];
+const LANE = { on: "var(--lane-send)", always: "var(--lane-send)", test: "var(--lane-send)",
+               holding: "var(--lane-hold)", pending: "var(--lane-open)", waiting: "var(--lane-wait)" };
+const SENDING = { on: 1, always: 1, test: 1, holding: 1 };
 
-function text(id, value) { document.getElementById(id).textContent = value; }
+let status = null;
+let saved = null;
+let draft = {};
+let hist = [];
+let lastSeq = -1;
+let failures = 0;
+let saving = false;
+let saveMsg = "";
+let saveErr = "";
+let paused = false;
+let frozen = null;
+let loadedAt = Date.now();
+let lastFallback = 0;
 
-function drawDiagram() {
-  const delay = Math.max(0, Number(document.getElementById("activationDelayMs").value) || 0);
-  const hold = Math.max(0, Number(document.getElementById("deactivationDelayS").value) || 0) * 1000;
-  const maxOn = Math.max(0, Number(document.getElementById("maxOnS").value) || 0) * 1000;
-  const levelText = document.getElementById("alarmShown").textContent;
-  const level = levelText === "—" ? 50 : Number(levelText);
-  const span = 10000;
-  const x0 = 78;
-  const width = 530;
-  const x = function (ms) { return x0 + (Math.max(0, Math.min(span, ms)) / span) * width; };
-  const gap = 800;
-  const loud = hold >= gap ? [[1500, 7800]] : [[1500, 5200], [6000, 7800]];
-  let segments = [];
-  loud.forEach(function (pair) {
-    const start = pair[0] + delay;
-    const end = pair[1] + hold;
-    if (start < end) segments.push([start, end]);
-  });
-  segments.sort(function (a, b) { return a[0] - b[0]; });
-  const merged = [];
-  segments.forEach(function (seg) {
-    const last = merged[merged.length - 1];
-    if (last && seg[0] <= last[1]) last[1] = Math.max(last[1], seg[1]);
-    else merged.push(seg.slice());
-  });
-  let cut = 0;
-  if (maxOn > 0 && merged.length) {
-    const cap = merged[0][0] + maxOn;
-    merged.forEach(function (seg) {
-      if (seg[1] > cap) {
-        cut = cap;
-        seg[1] = Math.max(seg[0], cap);
+function validIp(ip) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(ip || "");
+  if (!m) return false;
+  const p = m.slice(1).map(Number);
+  if (p.some((x, i) => x > 255 || String(x) !== m[i + 1])) return false;
+  return p[0] !== 0 && p[0] < 224;
+}
+
+function cfgFromStatus(s) {
+  return {
+    mode: !s.enabled ? "off" : s.testMode ? "test" : s.forceOn ? "always" : "auto",
+    trigger: s.trigger || "level",
+    level: s.deviceAlarmLevel >= 0 ? s.deviceAlarmLevel : null,
+    margin: s.marginDb, delay: s.activationDelayMs, hold: s.deactivationDelayS, maxOn: s.maxOnS,
+    ip: s.destinationIp || "", port: s.destinationPort, node: s.inputNode || ""
+  };
+}
+function cur() { return Object.assign({}, saved, draft); }
+function changedKeys() { return saved ? Object.keys(draft).filter((k) => draft[k] !== saved[k]) : []; }
+function setDraft(key, value) { draft[key] = value; saveMsg = ""; saveErr = ""; render(); }
+
+function mergeHistory(h) {
+  if (!h || !Array.isArray(h.level)) return;
+  const count = h.level.length;
+  const first = h.seq - count;
+  if (h.seq < lastSeq || first > lastSeq + KEEP) { hist = []; lastSeq = -1; }   /* restart or long gap */
+  if (lastSeq >= 0) {
+    for (let s = lastSeq + 1; s < first; s++) hist.push({ v: null, g: 0, p1: -1, p2: -1 });
+    if (first > lastSeq + 1) lastSeq = first - 1;
+  }
+  for (let i = 0; i < count; i++) {
+    const seq = first + i;
+    if (seq <= lastSeq) continue;
+    hist.push({ v: h.level[i], g: h.gate[i], p1: h.port1[i], p2: h.port2[i] });
+    lastSeq = seq;
+  }
+  if (hist.length > KEEP) hist.splice(0, hist.length - KEEP);
+}
+
+/* Mirrors update_gate() in lineinrtp.c, one step per 100 ms entry. */
+function simulate(h, c) {
+  const out = [];
+  if (c.mode === "off" || !validIp(c.ip)) return h.map(() => "off");
+  if (c.mode === "test") return h.map(() => "test");
+  if (c.mode === "always") return h.map(() => "always");
+  const level = c.level === null ? 101 : c.level;
+  const rel = level * Math.pow(10, -c.margin / 20);
+  let streaming = false, hotSince = -1, quietSince = -1, activeSince = -1, waiting = false;
+  for (let i = 0; i < h.length; i++) {
+    const t = i * 100;
+    let hot, idle;
+    if (c.trigger === "level") { const v = h[i].v || 0; hot = v >= level; idle = v < rel; }
+    else { hot = (c.trigger === "port1" ? h[i].p1 : h[i].p2) === 1; idle = !hot; }
+    if (waiting) { if (idle) { waiting = false; out.push("idle"); } else out.push("waiting"); continue; }
+    if (!streaming) {
+      if (hot) {
+        if (hotSince < 0) hotSince = t;
+        if (t - hotSince >= c.delay) { streaming = true; activeSince = t; quietSince = -1; out.push("on"); }
+        else out.push("pending");
+      } else { hotSince = -1; out.push("idle"); }
+      continue;
+    }
+    if (c.maxOn > 0 && t - activeSince >= c.maxOn * 1000) { waiting = true; streaming = false; hotSince = -1; out.push("waiting"); continue; }
+    if (idle) {
+      if (quietSince < 0) quietSince = t;
+      if (t - quietSince >= c.hold * 1000) { streaming = false; hotSince = -1; out.push("idle"); }
+      else out.push("holding");
+    } else { quietSince = -1; out.push("on"); }
+  }
+  return out;
+}
+
+function describe(sim) {
+  let opens = 0, ms = 0;
+  sim.forEach((s, i) => { if (SENDING[s]) { ms += 100; if (!i || !SENDING[sim[i - 1]]) opens++; } });
+  return { opens: opens, secs: ms / 1000 };
+}
+
+function paintSegments(el, sim, colors, offset, extraClass) {
+  const frag = document.createDocumentFragment();
+  let start = 0;
+  for (let i = 1; i <= sim.length; i++) {
+    if (i === sim.length || sim[i] !== sim[start]) {
+      const col = colors[sim[start]];
+      if (col) {
+        const d = document.createElement("div");
+        if (extraClass) d.className = extraClass;
+        d.style.left = ((offset + start) / N * 100).toFixed(2) + "%";
+        d.style.width = ((i - start) / N * 100).toFixed(2) + "%";
+        if (!extraClass) d.style.background = col;
+        frag.appendChild(d);
       }
-    });
-  }
-
-  let shapes = "";
-  loud.forEach(function (pair) {
-    shapes += '<rect x="' + x(pair[0]) + '" y="36" width="' + Math.max(1, x(pair[1]) - x(pair[0])) + '" height="28" rx="6" fill="#243044"/>';
-  });
-  merged.forEach(function (seg) {
-    if (seg[1] <= seg[0]) return;
-    shapes += '<rect x="' + x(seg[0]) + '" y="104" width="' + (x(seg[1]) - x(seg[0])) + '" height="26" rx="6" fill="#0e6b45"/>';
-  });
-  const cross = x(1500);
-  const started = merged.length ? x(merged[0][0]) : cross;
-  let cutLine = "";
-  if (cut) {
-    cutLine = '<line x1="' + x(cut) + '" y1="96" x2="' + x(cut) + '" y2="138" stroke="#8d1d18" stroke-width="2"/>';
-  }
-  const svg = document.getElementById("diagram");
-  svg.innerHTML =
-    '<text x="8" y="54" fill="#5e584e" font-size="12">Input</text>' +
-    '<text x="8" y="122" fill="#5e584e" font-size="12">Output</text>' +
-    '<line x1="' + x0 + '" y1="64" x2="' + (x0 + width) + '" y2="64" stroke="#e4dfd4"/>' +
-    shapes +
-    '<line x1="' + cross + '" y1="28" x2="' + cross + '" y2="70" stroke="#e2b100" stroke-width="2"/>' +
-    '<line x1="' + cross + '" y1="86" x2="' + started + '" y2="86" stroke="#8a5a00" stroke-width="2"/>' +
-    cutLine +
-    '<text x="' + cross + '" y="22" fill="#3d3200" font-size="11">level ' + level + '</text>';
-
-  const trigger = document.getElementById("trigger").value;
-  const cause = trigger === "port1" ? "Port 1 becomes active" : trigger === "port2" ? "Port 2 becomes active" : "the input reaches " + level + " on Audio detection";
-  const holdLabel = hold >= gap
-    ? "stays on through the short gap, then holds " + (hold / 1000) + " s after the input falls"
-    : "stops for the short gap because quiet hold is shorter than that gap, then holds " + (hold / 1000) + " s";
-  const maxLabel = maxOn > 0
-    ? " It will not stay on longer than " + (maxOn / 1000) + " s."
-    : " There is no maximum on time.";
-  text("diagramText",
-    "Output starts " + delay + " ms after " + cause + ", " + holdLabel + "." + maxLabel);
-}
-
-function applyStatus(data) {
-  const url = data.streamUrl || "";
-  document.getElementById("streamUrl").textContent = url || "Set a destination address";
-  document.getElementById("copyUrl").disabled = !url;
-  const gate = document.getElementById("gate");
-  gate.textContent = data.gate || "—";
-  gate.className = "pill " + (data.gate || "");
-  const percent = Math.max(0, Math.min(100, Number(data.levelPercent) || 0));
-  text("level", percent.toFixed(0));
-  text("packets", String(data.packetsSent));
-  text("errors", String(data.sendErrors));
-  const alarm = Number(data.deviceAlarmLevel);
-  const known = Number.isFinite(alarm) && alarm >= 0;
-  const editing = document.activeElement && document.activeElement.form === document.getElementById("form");
-  if (!editing && data.trigger) document.getElementById("trigger").value = data.trigger;
-  const triggerNow = document.getElementById("trigger").value || data.trigger || "level";
-  if (triggerNow === "port1" || triggerNow === "port2") {
-    const active = triggerNow === "port1" ? Number(data.port1Active) : Number(data.port2Active);
-    text("triggerLabel", triggerNow === "port1" ? "Port 1" : "Port 2");
-    text("triggerNote", "The stream follows this input. Audio level is not used.");
-    text("alarmShown", active < 0 ? "—" : active === 1 ? "Active" : "Inactive");
-  } else {
-    text("triggerLabel", "Activation level");
-    text("triggerNote", "Taken from Audio detection on this device.");
-    text("alarmShown", known ? String(alarm) : "—");
-  }
-  text("markLabel", known ? "Audio detection " + alarm : "Audio detection");
-  document.getElementById("bar").style.width = percent + "%";
-  document.getElementById("mark").style.left = (known ? alarm : 50) + "%";
-  text("lasterror", data.lastError || "");
-  text("capture", data.nodeConnected
-    ? data.connectedNode + " · " + data.captureRate + " Hz · " + data.captureChannels + " ch"
-    : "Waiting for " + (data.inputNode || "the input"));
-  if (document.activeElement && document.activeElement.form === document.getElementById("form") &&
-      document.activeElement.id !== "copyUrl") {
-    drawDiagram();
-    return;
-  }
-  document.getElementById("enabled").checked = !!data.enabled;
-  document.getElementById("forceOn").checked = !!data.forceOn;
-  document.getElementById("testMode").checked = !!data.testMode;
-  ["destinationIp", "destinationPort", "marginDb", "activationDelayMs", "deactivationDelayS", "maxOnS", "inputNode"]
-    .forEach(function (id) {
-      const el = document.getElementById(id);
-      if (data[id] !== undefined && document.activeElement !== el) el.value = data[id];
-    });
-  drawDiagram();
-}
-
-async function deviceAlarmLevel() {
-  const response = await fetch("/axis-cgi/param.cgi?action=list&group=AudioSource.A0.AlarmLevel", {cache: "no-store"});
-  const body = await response.text();
-  const match = body.match(/AlarmLevel=(\d+)/);
-  if (!match) return null;
-  const level = Number(match[1]);
-  return level >= 0 && level <= 100 ? level : null;
-}
-
-async function refresh() {
-  const response = await fetch("api/status", {cache: "no-store"});
-  const data = await response.json();
-  const reported = Number(data.deviceAlarmLevel);
-  const level = await deviceAlarmLevel().catch(function () { return null; });
-  if (level !== null) {
-    data.deviceAlarmLevel = level;
-    if (level !== reported) {
-      fetch("api/config", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({deviceAlarmLevel: level})
-      }).catch(function () {});
+      start = i;
     }
   }
-  applyStatus(data);
+  el.replaceChildren(frag);
 }
 
-document.getElementById("form").addEventListener("input", drawDiagram);
-document.getElementById("form").addEventListener("submit", async function (event) {
-  event.preventDefault();
-  const body = {
-    enabled: document.getElementById("enabled").checked,
-    forceOn: document.getElementById("forceOn").checked,
-    testMode: document.getElementById("testMode").checked,
-    trigger: document.getElementById("trigger").value
-  };
-  Object.keys(numeric).concat(["destinationIp", "inputNode"]).forEach(function (id) {
-    const raw = document.getElementById(id).value.trim();
-    body[id] = numeric[id] ? Number(raw) : raw;
-  });
-  const response = await fetch("api/config", {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(body)
-  });
-  const data = await response.json();
-  text("saveMsg", data.ok ? "Saved" : (data.error || "Save failed"));
-  refresh();
-});
+function times(n) { return n === 1 ? "1 time" : n + " times"; }
 
-document.getElementById("copyUrl").addEventListener("click", async function () {
-  const url = document.getElementById("streamUrl").textContent;
-  if (!url || url.indexOf("rtp://") !== 0) return;
-  try {
-    await navigator.clipboard.writeText(url);
-  } catch (err) {
-    const box = document.createElement("textarea");
-    box.value = url;
-    document.body.appendChild(box);
-    box.select();
-    document.execCommand("copy");
-    box.remove();
+function renderChart(c, dirty) {
+  const H = paused && frozen ? frozen : hist;
+  const view = H.slice(-N);
+  const off = N - view.length;
+  const isAuto = c.mode === "auto";
+  const isLevel = isAuto && c.trigger === "level" && c.level !== null;
+  const isPort = isAuto && c.trigger !== "level";
+  const x = (i) => ((off + i) / (N - 1) * 1000).toFixed(1);
+
+  let line = "";
+  view.forEach((p, i) => { line += (i ? "L" : "M") + x(i) + " " + (200 - (p.v || 0) * 2).toFixed(1); });
+  $("trace").setAttribute("d", line);
+  $("area").setAttribute("d", view.length ? line + "L1000 200L" + x(0) + " 200Z" : "");
+  let port = "";
+  if (isPort && view.length) {
+    let prev = null;
+    view.forEach((p, i) => {
+      const y = (c.trigger === "port1" ? p.p1 : p.p2) === 1 ? 30 : 186;
+      if (prev === null) port += "M" + x(i) + " " + y;
+      else if (prev !== y) port += "L" + x(i) + " " + prev + "L" + x(i) + " " + y;
+      prev = y;
+    });
+    port += "L1000 " + prev;
   }
-  document.getElementById("copyUrl").textContent = "Copied";
-  setTimeout(function () { document.getElementById("copyUrl").textContent = "Copy"; }, 1200);
-});
+  $("portTrace").setAttribute("d", port);
 
-refresh();
-setInterval(function () { refresh().catch(function () {}); }, 500);
+  document.querySelectorAll("[data-show=level]").forEach((el) => { el.hidden = !isLevel; });
+  document.querySelectorAll("[data-show=port]").forEach((el) => { el.hidden = !isPort; });
+  $("portLegend").textContent = c.trigger === "port2" ? "I/O port 2" : "I/O port 1";
+  $("chartTitle").textContent = isPort ? "Input and trigger" : "Input level";
+  if (isLevel) {
+    const rel = c.level * Math.pow(10, -c.margin / 20);
+    $("thrLine").style.top = (100 - c.level) + "%";
+    $("thrTag").style.top = (100 - c.level) + "%";
+    $("relLine").style.top = (100 - rel) + "%";
+    $("relTag").style.top = (100 - rel) + "%";
+    $("thrTag").textContent = "Opens at " + c.level;
+    $("relTag").textContent = "Closes below " + rel.toFixed(0);
+  }
+
+  const real = view.map((p) => {
+    const g = GATE[p.g] || "idle";
+    if (g === "on" && status && status.forceOn) return "always";
+    return g;
+  });
+  paintSegments($("laneSent"), real, LANE, off);
+  const dReal = describe(real);
+  $("laneSent").setAttribute("aria-label", "Sent: " + dReal.opens + " starts, " + dReal.secs.toFixed(1) + " s in the last 24 s");
+  $("laneSentLabel").textContent = dirty ? "Saved" : "Sent";
+
+  let caption;
+  if (dirty) {
+    const sim = simulate(H, c).slice(-N);
+    const dSim = describe(sim);
+    paintSegments($("lanePreview"), sim, LANE, off);
+    paintSegments($("shade"), sim, LANE, off, "shade");
+    $("lanePreview").setAttribute("aria-label", "Preview: " + dSim.opens + " starts, " + dSim.secs.toFixed(1) + " s");
+    caption = "Preview: with your changes, the last " + Math.round(view.length / 10) + " s would have started " + times(dSim.opens) +
+      " and sent " + dSim.secs.toFixed(1) + " s of audio. What was actually sent: " + times(dReal.opens) + ", " + dReal.secs.toFixed(1) + " s.";
+  } else {
+    paintSegments($("shade"), real, LANE, off, "shade");
+    caption = isAuto ? "Move any setting below to replay the recorded input with it before you save." : modeHelp(c.mode);
+  }
+  $("previewRow").hidden = !dirty;
+  $("caption").textContent = caption;
+  const last = view[view.length - 1];
+  $("plotSvg").setAttribute("aria-label", "Input level over the last 24 seconds" + (last && last.v !== null ? ", latest peak " + last.v + " of 100" : ""));
+}
+
+function modeHelp(mode) {
+  return {
+    off: "Nothing is sent.",
+    auto: "Sends while the trigger is active, shaped by the timing below.",
+    always: "Sends the line input all the time and ignores the trigger.",
+    test: "Sends a 1 kHz tone at −12 dBFS so you can check the receiver end to end."
+  }[mode];
+}
+
+function syncInput(el, value) {
+  if (document.activeElement === el) return;
+  const v = value === null || value === undefined ? "" : String(value);
+  if (el.value !== v) el.value = v;
+}
+
+function notice(text) {
+  const d = document.createElement("div");
+  d.className = "notice";
+  d.setAttribute("role", "alert");
+  d.textContent = text;
+  return d;
+}
+
+function renderChip() {
+  const chip = $("chip");
+  let cls = "", text = "Connecting…";
+  if (failures >= 3) { cls = "lost"; text = "Connection lost"; }
+  else if (status) {
+    const g = status.gate;
+    if (!status.enabled) text = "Off";
+    else if (!status.destinationIp) text = "No destination";
+    else if (g === "test") { cls = "send"; text = "Sending test tone"; }
+    else if (g === "active") { cls = "send"; text = status.forceOn ? "Streaming, always on" : "Streaming"; }
+    else if (g === "holding") { cls = "hold"; text = "Holding"; }
+    else if (g === "pending") { cls = "hold"; text = "Opening"; }
+    else if (g === "waiting") { cls = "wait"; text = "Max on time, re-arming"; }
+    else text = "Listening";
+  }
+  chip.className = "chip " + cls;
+  $("chipText").textContent = text;
+}
+
+function render() {
+  renderChip();
+  if (!saved) return;
+  const c = cur();
+  const changed = changedKeys();
+  const dirty = changed.length > 0;
+
+  $("save").hidden = $("discard").hidden = !dirty && !saving;
+  $("save").disabled = saving || (c.ip !== "" && !validIp(c.ip));
+  $("discard").disabled = saving;
+  $("save").textContent = saving ? "Saving…" : "Save changes";
+  const st = $("saveState");
+  st.className = saveErr ? "saveerr" : "";
+  st.textContent = saveErr || (dirty ? (changed.length === 1 ? "1 unsaved change" : changed.length + " unsaved changes") : (saveMsg || "All changes saved"));
+
+  document.querySelectorAll("#modes button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === c.mode)));
+  document.querySelectorAll("#triggers button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === c.trigger)));
+  $("modeHelp").textContent = modeHelp(c.mode);
+  const isAuto = c.mode === "auto";
+  const isLevel = isAuto && c.trigger === "level";
+  $("triggerField").hidden = !isAuto;
+  $("trigHelp").textContent = isLevel ? "Opens when the input peak reaches the activation level." : "Follows the digital input. The audio level is not used.";
+  $("noTiming").hidden = isAuto;
+
+  const rel = c.level === null ? null : c.level * Math.pow(10, -c.margin / 20);
+  document.querySelectorAll(".slider").forEach((row) => {
+    const key = row.dataset.key;
+    row.hidden = !isAuto || ((key === "level" || key === "margin") && !isLevel);
+    row.querySelectorAll("input").forEach((el) => syncInput(el, c[key]));
+  });
+  document.querySelector("[data-help=margin]").textContent = rel === null
+    ? "Counts as quiet below the activation level minus this margin."
+    : "Counts as quiet below " + rel.toFixed(0) + ", which is " + c.margin + " dB under the activation level.";
+  document.querySelector("[data-help=hold]").textContent = c.hold === 0
+    ? "Stops as soon as the trigger goes quiet." : "Keeps sending through gaps shorter than " + c.hold + " s.";
+  document.querySelector("[data-help=maxOn]").textContent = c.maxOn === 0
+    ? "No limit. Set a limit to stop a stuck input from streaming forever."
+    : "Stops after " + c.maxOn + " s, then waits for the trigger to go quiet before it can start again.";
+
+  syncInput($("ip"), c.ip);
+  syncInput($("port"), c.port);
+  syncInput($("node"), c.node);
+  const ipBad = c.ip !== "" && !validIp(c.ip);
+  $("ip").setAttribute("aria-invalid", String(ipBad));
+  $("ipErr").hidden = !ipBad;
+  $("url").textContent = c.ip ? "rtp://" + c.ip + ":" + c.port : "Set a receiver address";
+  $("copy").disabled = !c.ip || ipBad;
+
+  const notices = [];
+  if (failures >= 3) notices.push(notice("Lost contact with the app. The values shown may be out of date."));
+  if (status && status.lastError) notices.push(notice(status.lastError));
+  if (c.mode !== "off" && !c.ip) notices.push(notice("Set a receiver IP address to start sending."));
+  if (isLevel && c.level === null) notices.push(notice("The activation level is not known yet. Set it here or on the device's Audio detection page."));
+  else if (isLevel && status && status.alarmSource !== "device" && Date.now() - loadedAt > 20000)
+    notices.push(notice("The app could not read the activation level from the device, so it uses the last value this page reported."));
+  $("notices").replaceChildren.apply($("notices"), notices);
+
+  if (status) {
+    const pct = Math.max(0, Math.min(100, Number(status.levelPercent) || 0));
+    $("stLevel").textContent = pct.toFixed(0);
+    $("stLevelDb").textContent = status.levelDb > -119 ? status.levelDb.toFixed(1) + " dBFS RMS" : "Silent";
+    $("stPackets").textContent = Number(status.packetsSent).toLocaleString();
+    $("stErrors").textContent = Number(status.sendErrors).toLocaleString();
+    $("stDropped").textContent = Number(status.samplesDropped).toLocaleString();
+    $("stCapture").textContent = status.nodeConnected ? (status.captureRate / 1000) + " kHz" : "Waiting";
+    $("stCaptureSub").textContent = status.nodeConnected ? status.captureChannels + " ch · " + status.connectedNode : status.inputNode;
+    $("dCapture").textContent = status.nodeConnected ? status.connectedNode + ", " + status.captureRate + " Hz, " + status.captureChannels + " ch" : "Waiting for " + status.inputNode;
+    $("dBuffered").textContent = status.bufferedSamples + " samples";
+    $("dHeader").textContent = status.lastRtpHeader || "—";
+    $("dSource").textContent = { device: "Read from the device", page: "Reported by this page", cached: "Last known value", none: "Unknown" }[status.alarmSource] || status.alarmSource;
+    $("dError").textContent = status.lastError || "None";
+  }
+  renderChart(c, dirty);
+}
+
+async function fetchStatus() {
+  const r = await fetch("api/status", { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+
+function applyStatus(s) {
+  status = s;
+  saved = cfgFromStatus(s);
+  mergeHistory(s.history);
+  /* Drop draft keys that now match, so saved state wins once confirmed. */
+  Object.keys(draft).forEach((k) => { if (draft[k] === saved[k]) delete draft[k]; });
+}
+
+/* Fallback for devices where the app cannot read AlarmLevel itself. */
+async function reportDeviceLevel() {
+  if (!status || status.alarmSource === "device" || Date.now() - lastFallback < 30000) return;
+  lastFallback = Date.now();
+  try {
+    const r = await fetch("/axis-cgi/param.cgi?action=list&group=AudioSource.A0.AlarmLevel", { cache: "no-store" });
+    const m = (await r.text()).match(/AlarmLevel=(\d+)/);
+    const level = m ? Number(m[1]) : -1;
+    if (level >= 0 && level <= 100 && level !== status.deviceAlarmLevel) {
+      await fetch("api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceAlarmLevel: level }) });
+    }
+  } catch (e) { /* the app's own poll is the primary path */ }
+}
+
+async function poll() {
+  try {
+    applyStatus(await fetchStatus());
+    failures = 0;
+    reportDeviceLevel();
+  } catch (e) {
+    failures++;
+  }
+  render();
+  setTimeout(poll, POLL_MS);
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function save() {
+  const c = cur();
+  const changed = changedKeys();
+  if (c.ip && !validIp(c.ip)) return;
+  saving = true; saveErr = ""; saveMsg = "";
+  render();
+  try {
+    const levelChanged = changed.indexOf("level") >= 0 && c.level !== null;
+    if (levelChanged) {
+      const r = await fetch("/axis-cgi/param.cgi?action=update&AudioSource.A0.AlarmLevel=" + c.level, { cache: "no-store" });
+      const t = await r.text();
+      if (!r.ok || !/^OK/m.test(t)) throw new Error("Could not change Audio detection on the device");
+    }
+    const body = {
+      enabled: c.mode !== "off", forceOn: c.mode === "always", testMode: c.mode === "test", trigger: c.trigger,
+      destinationIp: c.ip, destinationPort: c.port, marginDb: c.margin, activationDelayMs: c.delay,
+      deactivationDelayS: c.hold, maxOnS: c.maxOn, inputNode: c.node
+    };
+    if (levelChanged) body.deviceAlarmLevel = c.level;
+    const r = await fetch("api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) throw new Error(data.error || "Save failed (HTTP " + r.status + ")");
+    const deadline = Date.now() + 8000;
+    let confirmed = false;
+    while (Date.now() < deadline) {
+      const s = await fetchStatus();
+      if (!data.rev || s.configRev >= data.rev) {
+        if (s.configError) throw new Error(s.configError);
+        if (!levelChanged || s.deviceAlarmLevel === c.level) { applyStatus(s); confirmed = true; break; }
+      }
+      await sleep(150);
+    }
+    if (!confirmed) throw new Error("The app did not confirm the save. Check the values and try again.");
+    Object.keys(draft).forEach((k) => { if (draft[k] === c[k]) delete draft[k]; });
+    saveMsg = "Saved";
+    setTimeout(() => { saveMsg = ""; render(); }, 2500);
+  } catch (e) {
+    saveErr = e.message;
+  } finally {
+    saving = false;
+    render();
+  }
+}
+
+document.querySelectorAll("#modes button").forEach((b) => b.addEventListener("click", () => setDraft("mode", b.dataset.v)));
+document.querySelectorAll("#triggers button").forEach((b) => b.addEventListener("click", () => setDraft("trigger", b.dataset.v)));
+document.querySelectorAll(".slider").forEach((row) => {
+  const key = row.dataset.key, min = Number(row.dataset.min), max = Number(row.dataset.max);
+  row.querySelectorAll("input").forEach((el) => el.addEventListener("input", () => {
+    if (el.value === "") return;
+    const v = Number(el.value);
+    if (!Number.isFinite(v)) return;
+    setDraft(key, Math.max(min, Math.min(max, Math.round(v))));
+  }));
+});
+$("ip").addEventListener("input", (e) => setDraft("ip", e.target.value.trim()));
+$("port").addEventListener("input", (e) => {
+  const v = Math.round(Number(e.target.value));
+  if (e.target.value !== "" && v >= 1 && v <= 65535) setDraft("port", v);
+});
+$("node").addEventListener("input", (e) => setDraft("node", e.target.value.trim()));
+$("save").addEventListener("click", save);
+$("discard").addEventListener("click", () => { draft = {}; saveErr = ""; render(); });
+$("pause").addEventListener("click", () => {
+  paused = !paused;
+  frozen = paused ? hist.slice() : null;
+  $("pause").textContent = paused ? "Resume" : "Pause";
+  $("pause").setAttribute("aria-pressed", String(paused));
+  render();
+});
+$("copy").addEventListener("click", async () => {
+  const url = $("url").textContent;
+  if (url.indexOf("rtp://") !== 0) return;
+  try { await navigator.clipboard.writeText(url); }
+  catch (e) {
+    const box = document.createElement("textarea");
+    box.value = url; document.body.appendChild(box); box.select();
+    document.execCommand("copy"); box.remove();
+  }
+  $("copy").lastChild.textContent = "Copied";
+  setTimeout(() => { $("copy").lastChild.textContent = "Copy"; }, 1400);
+});
+window.addEventListener("beforeunload", (e) => { if (changedKeys().length) { e.preventDefault(); e.returnValue = ""; } });
+
+poll();
 </script>
 </body>
 </html>
