@@ -200,7 +200,7 @@
     </div>
     <div class="chart">
       <div class="crow">
-        <div class="yaxis" aria-hidden="true"><span>0 dB</span><span>−20</span><span>−40</span><span>−60</span></div>
+        <div class="yaxis" aria-hidden="true"><span>0 dB</span><span>−30</span><span>−60</span><span>−90</span></div>
         <div class="plot">
           <div id="shade"></div>
           <div class="mid" aria-hidden="true" style="top:33.333%"></div>
@@ -258,10 +258,10 @@
         <p class="help" id="trigHelp"></p>
       </div>
       <div>
-        <div class="slider" data-key="level" data-min="0" data-max="100">
-          <div class="top"><label for="sLevel">Activation level</label><span class="num"><input type="number" min="0" max="100" step="1" aria-label="Activation level, exact value"><span></span></span></div>
-          <input id="sLevel" type="range" min="0" max="100" step="1">
-          <p class="help" data-help="level">The same setting as Audio detection on the device. Changing it here changes it there.</p>
+        <div class="slider" data-key="level" data-min="-90" data-max="0">
+          <div class="top"><label for="sLevel">Activation level</label><span class="num"><input type="number" min="-90" max="0" step="1" aria-label="Activation level in dBFS, exact value"><span>dB</span></span></div>
+          <input id="sLevel" type="range" min="-90" max="0" step="1">
+          <p class="help" data-help="level">Opens when the input peak reaches this level, in dBFS.</p>
         </div>
         <div class="slider" data-key="margin" data-min="0" data-max="40">
           <div class="top"><label for="sMargin">Release margin</label><span class="num"><input type="number" min="0" max="40" step="1" aria-label="Release margin, exact value"><span>dB</span></span></div>
@@ -325,7 +325,6 @@
             <dt>Capture</dt><dd id="dCapture">—</dd>
             <dt>Buffered</dt><dd class="mono" id="dBuffered">0</dd>
             <dt>Last RTP header</dt><dd class="mono" id="dHeader">—</dd>
-            <dt>Level source</dt><dd id="dSource">—</dd>
             <dt>Last error</dt><dd id="dError">None</dd>
           </dl>
         </div>
@@ -372,7 +371,7 @@ function cfgFromStatus(s) {
   return {
     mode: !s.enabled ? "off" : s.testMode ? "test" : s.forceOn ? "always" : "auto",
     trigger: s.trigger || "level",
-    level: s.deviceAlarmLevel >= 0 ? s.deviceAlarmLevel : null,
+    level: typeof s.thresholdDb === "number" ? s.thresholdDb : -45,
     margin: s.marginDb, delay: s.activationDelayMs, hold: s.deactivationDelayS, maxOn: s.maxOnS,
     ip: s.destinationIp || "", port: s.destinationPort, node: s.inputNode || ""
   };
@@ -405,13 +404,12 @@ function simulate(h, c) {
   if (c.mode === "off" || !validIp(c.ip)) return h.map(() => "off");
   if (c.mode === "test") return h.map(() => "test");
   if (c.mode === "always") return h.map(() => "always");
-  const level = c.level === null ? 101 : c.level;
-  const rel = level * Math.pow(10, -c.margin / 20);
+  const rel = releaseDb(c);
   let streaming = false, hotSince = -1, quietSince = -1, activeSince = -1, waiting = false;
   for (let i = 0; i < h.length; i++) {
     const t = i * 100;
     let hot, idle;
-    if (c.trigger === "level") { const v = h[i].v || 0; hot = v >= level; idle = v < rel; }
+    if (c.trigger === "level") { const d = toDb(h[i].v || 0); hot = d >= c.level; idle = d < rel; }
     else { hot = (c.trigger === "port1" ? h[i].p1 : h[i].p2) === 1; idle = !hot; }
     if (waiting) { if (idle) { waiting = false; out.push("idle"); } else out.push("waiting"); continue; }
     if (!streaming) {
@@ -475,10 +473,18 @@ function paintLane(el, sim, off) {
 /* Vertical scale: peak dBFS, -60 at the bottom to 0 at the top. The app
    reports peaks as 0-100 linear, the same scale as the device's Audio
    detection level. */
-const DB_MIN = -60;
+const DB_MIN = -90;       /* also the lowest threshold: C8110 silence sits near -90 dBFS */
+const MARGIN_MAX = 40;
+const yFracDb = (d) => Math.max(0, Math.min(1, (d - DB_MIN) / -DB_MIN));
+/* Closing level in dBFS: threshold minus margin, never below the floor. */
+const releaseDb = (c) => Math.max(DB_MIN, c.level - c.margin);
+/* Largest margin that keeps the closing level at or above the floor. */
+const marginCap = (level) => Math.max(0, Math.min(MARGIN_MAX, level - DB_MIN));
 const toDb = (v) => (v > 0 ? 20 * Math.log10(v / 100) : -120);
 const yFrac = (v) => Math.max(0, Math.min(1, (toDb(v) - DB_MIN) / -DB_MIN));
 const fmtDb = (d) => (d <= -100 ? "−∞" : (d < 0 ? "−" : "") + Math.abs(d).toFixed(1));
+/* Whole-dB settings such as the threshold: "−55", not "−55.0". */
+const fmtLvl = (d) => (d < 0 ? "−" : "") + Math.abs(Math.round(d));
 
 function times(n) { return n === 1 ? "1 time" : n + " times"; }
 
@@ -487,7 +493,7 @@ function renderChart(c, dirty) {
   const view = H.slice(-N);
   const off = N - view.length;
   const isAuto = c.mode === "auto";
-  const isLevel = isAuto && c.trigger === "level" && c.level !== null;
+  const isLevel = isAuto && c.trigger === "level";
   const isPort = isAuto && c.trigger !== "level";
   /* Entry i covers [i/N, (i+1)/N] of the width: the same scale as the bars. */
   const x = (i) => ((off + i + 0.5) / N * 1000).toFixed(1);
@@ -515,15 +521,15 @@ function renderChart(c, dirty) {
   $("portLegend").textContent = c.trigger === "port2" ? "I/O port 2" : "I/O port 1";
   $("chartTitle").textContent = isPort ? "Input and trigger" : "Input level";
   if (isLevel) {
-    const rel = c.level * Math.pow(10, -c.margin / 20);
-    const thrTop = ((1 - yFrac(c.level)) * 100).toFixed(2) + "%";
-    const relTop = ((1 - yFrac(rel)) * 100).toFixed(2) + "%";
+    const rel = releaseDb(c);
+    const thrTop = ((1 - yFracDb(c.level)) * 100).toFixed(2) + "%";
+    const relTop = ((1 - yFracDb(rel)) * 100).toFixed(2) + "%";
     $("thrLine").style.top = thrTop;
     $("thrTag").style.top = thrTop;
     $("relLine").style.top = relTop;
     $("relTag").style.top = relTop;
-    $("thrTag").textContent = "Opens at " + c.level + " (" + fmtDb(toDb(c.level)) + " dB)";
-    $("relTag").textContent = "Closes below " + fmtDb(toDb(rel)) + " dB";
+    $("thrTag").textContent = "Opens at " + fmtLvl(c.level) + " dB";
+    $("relTag").textContent = "Closes below " + fmtLvl(rel) + " dB";
   }
 
   const real = view.map((p) => {
@@ -622,18 +628,22 @@ function render() {
   $("trigHelp").textContent = isLevel ? "Opens when the input peak reaches the activation level." : "Follows the digital input. The audio level is not used.";
   $("noTiming").hidden = isAuto;
 
-  const rel = c.level === null ? null : c.level * Math.pow(10, -c.margin / 20);
+  const rel = releaseDb(c);
+  const cap = marginCap(c.level);
   document.querySelectorAll(".slider").forEach((row) => {
     const key = row.dataset.key;
     row.hidden = !isAuto || ((key === "level" || key === "margin") && !isLevel);
+    if (key === "margin") {
+      row.dataset.max = String(cap);
+      row.querySelectorAll("input").forEach((el) => { el.max = String(cap); });
+    }
     row.querySelectorAll("input").forEach((el) => syncInput(el, c[key]));
   });
-  document.querySelector("[data-help=level]").textContent = c.level === null
-    ? "The same setting as Audio detection on the device, on its 0–100 scale. Changing it here changes it there."
-    : "The same setting as Audio detection on the device, on its 0–100 scale. " + c.level + " opens at " + fmtDb(toDb(c.level)) + " dBFS peak.";
-  document.querySelector("[data-help=margin]").textContent = rel === null
-    ? "Counts as quiet below the activation level minus this margin."
-    : "Counts as quiet below " + fmtDb(toDb(rel)) + " dBFS, which is " + c.margin + " dB under the activation level.";
+  document.querySelector("[data-help=level]").textContent =
+    "Opens when the input peak reaches " + fmtLvl(c.level) + " dBFS. Line-level speech usually peaks between −30 and −10 dB.";
+  document.querySelector("[data-help=margin]").textContent = cap < MARGIN_MAX
+    ? "Counts as quiet below " + fmtLvl(rel) + " dBFS. Up to " + cap + " dB here, so the closing level stays above the −90 dB floor."
+    : "Counts as quiet below " + fmtLvl(rel) + " dBFS, which is " + c.margin + " dB under the activation level.";
   document.querySelector("[data-help=hold]").textContent = c.hold === 0
     ? "Stops as soon as the trigger goes quiet." : "Keeps sending through gaps shorter than " + c.hold + " s.";
   document.querySelector("[data-help=maxOn]").textContent = c.maxOn === 0
@@ -653,15 +663,12 @@ function render() {
   if (failures >= 3) notices.push(notice("Lost contact with the app. The values shown may be out of date."));
   if (status && status.lastError) notices.push(notice(status.lastError));
   if (c.mode !== "off" && !c.ip) notices.push(notice("Set a receiver IP address to start sending."));
-  if (isLevel && c.level === null) notices.push(notice("The activation level is not known yet. Set it here or on the device's Audio detection page."));
-  else if (isLevel && status && status.alarmSource !== "device" && Date.now() - loadedAt > 20000)
-    notices.push(notice("The app could not read the activation level from the device, so it uses the last value this page reported."));
   $("notices").replaceChildren.apply($("notices"), notices);
 
   if (status) {
     const pct = Math.max(0, Math.min(100, Number(status.levelPercent) || 0));
     $("stLevel").textContent = fmtDb(toDb(pct)) + " dB";
-    $("stLevelDb").textContent = pct.toFixed(0) + " on the 0–100 detection scale";
+    $("stLevelDb").textContent = status.levelDb > -119 ? "RMS " + fmtDb(status.levelDb) + " dBFS" : "Silent";
     $("stPackets").textContent = Number(status.packetsSent).toLocaleString();
     $("stErrors").textContent = Number(status.sendErrors).toLocaleString();
     $("stDropped").textContent = Number(status.samplesDropped).toLocaleString();
@@ -670,7 +677,6 @@ function render() {
     $("dCapture").textContent = status.nodeConnected ? status.connectedNode + ", " + status.captureRate + " Hz, " + status.captureChannels + " ch" : "Waiting for " + status.inputNode;
     $("dBuffered").textContent = status.bufferedSamples + " samples";
     $("dHeader").textContent = status.lastRtpHeader || "—";
-    $("dSource").textContent = { device: "Read from the device", page: "Reported by this page", cached: "Last known value", none: "Unknown" }[status.alarmSource] || status.alarmSource;
     $("dError").textContent = status.lastError || "None";
   }
   $("inputPill").hidden = !audioInput.type;
@@ -721,9 +727,8 @@ function applyStatus(s) {
   Object.keys(draft).forEach((k) => { if (draft[k] === saved[k]) delete draft[k]; });
 }
 
-/* Reads the device's audio input settings every 30 s: input type and gain
-   for the readout and hints, and AlarmLevel as a fallback for devices where
-   the app cannot read it itself. */
+/* Reads the device's audio input type and gain every 30 s, for the readout
+   beside the chart and the input hints. */
 async function readDeviceAudio() {
   if (!status || Date.now() - lastFallback < 30000) return;
   lastFallback = Date.now();
@@ -733,12 +738,7 @@ async function readDeviceAudio() {
     const type = body.match(/AudioSource\.A0\.InputType=([^\r\n]*)/);
     const gain = body.match(/AudioSource\.A0\.InputGain=([^\r\n]*)/);
     audioInput = { type: type ? type[1].trim().toLowerCase() : null, gain: gain ? gain[1].trim() : null };
-    const m = body.match(/AudioSource\.A0\.AlarmLevel=(\d+)/);
-    const level = m ? Number(m[1]) : -1;
-    if (status.alarmSource !== "device" && level >= 0 && level <= 100 && level !== status.deviceAlarmLevel) {
-      await fetch("api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ deviceAlarmLevel: level }) });
-    }
-  } catch (e) { /* the app's own poll is the primary path */ }
+  } catch (e) { /* the readout stays hidden */ }
 }
 
 async function poll() {
@@ -757,23 +757,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function save() {
   const c = cur();
-  const changed = changedKeys();
   if (c.ip && !validIp(c.ip)) return;
   saving = true; saveErr = ""; saveMsg = "";
   render();
   try {
-    const levelChanged = changed.indexOf("level") >= 0 && c.level !== null;
-    if (levelChanged) {
-      const r = await fetch("/axis-cgi/param.cgi?action=update&AudioSource.A0.AlarmLevel=" + c.level, { cache: "no-store" });
-      const t = await r.text();
-      if (!r.ok || !/^OK/m.test(t)) throw new Error("Could not change Audio detection on the device");
-    }
     const body = {
       enabled: c.mode !== "off", forceOn: c.mode === "always", testMode: c.mode === "test", trigger: c.trigger,
-      destinationIp: c.ip, destinationPort: c.port, marginDb: c.margin, activationDelayMs: c.delay,
+      destinationIp: c.ip, destinationPort: c.port, thresholdDb: c.level, marginDb: c.margin, activationDelayMs: c.delay,
       deactivationDelayS: c.hold, maxOnS: c.maxOn, inputNode: c.node
     };
-    if (levelChanged) body.deviceAlarmLevel = c.level;
     const r = await fetch("api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await r.json().catch(() => ({}));
     if (!r.ok || !data.ok) throw new Error(data.error || "Save failed (HTTP " + r.status + ")");
@@ -783,7 +775,7 @@ async function save() {
       const s = await fetchStatus();
       if (!data.rev || s.configRev >= data.rev) {
         if (s.configError) throw new Error(s.configError);
-        if (!levelChanged || s.deviceAlarmLevel === c.level) { applyStatus(s); confirmed = true; break; }
+        applyStatus(s); confirmed = true; break;
       }
       await sleep(150);
     }
@@ -807,7 +799,11 @@ document.querySelectorAll(".slider").forEach((row) => {
     if (el.value === "") return;
     const v = Number(el.value);
     if (!Number.isFinite(v)) return;
-    setDraft(key, Math.max(min, Math.min(max, Math.round(v))));
+    const top = key === "margin" ? marginCap(cur().level) : max;
+    const value = Math.max(min, Math.min(top, Math.round(v)));
+    /* Lowering the threshold can shrink the margin's range: keep the margin inside it. */
+    if (key === "level" && cur().margin > marginCap(value)) draft.margin = marginCap(value);
+    setDraft(key, value);
   }));
 });
 $("ip").addEventListener("input", (e) => setDraft("ip", e.target.value.trim()));

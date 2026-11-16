@@ -3,13 +3,10 @@
     "resources": {
         "linux": {
             "user": {
-                "groups": ["pipewire"]
+                "groups": [
+                    "pipewire"
+                ]
             }
-        },
-        "dbus": {
-            "requiredMethods": [
-                "com.axis.HTTPConf1.VAPIXServiceAccounts1.GetCredentials"
-            ]
         }
     },
     "acapPackageConf": {
@@ -19,7 +16,7 @@
             "vendor": "dnicholl.axis@gmail.com",
             "vendorId": "6ee443117c",
             "runMode": "respawn",
-            "version": "1.5.2",
+            "version": "1.6.0",
             "compatibleOsVersions": [
                 {
                     "min": "12.11.72",
@@ -96,11 +93,6 @@
                     "name": "MaxOnS",
                     "default": "0",
                     "type": "int:0,3600"
-                },
-                {
-                    "name": "CachedAlarmLevel",
-                    "default": "-1",
-                    "type": "int:-1,100"
                 },
                 {
                     "name": "InputNode",

@@ -8,6 +8,7 @@ Method: I read every file. Nothing was built or run on a device, so the findings
 - **Fixed:** H1, H2, H3 and M9. M10 is fixed for the settings page: saves are confirmed by revision.
 - **Not yet verified on a device:** the VAPIX read of AlarmLevel and PipeWire recovery.
 - **Open:** everything else below.
+- **1.6.0:** H1 and M5's scale concern are gone. The app now owns its threshold in dBFS (`ThresholdDb`) and no longer depends on the device's Audio detection level, so the VAPIX reader was removed.
 
 ## Summary
 

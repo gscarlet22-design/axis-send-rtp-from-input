@@ -10,9 +10,9 @@ This ACAP sends the C8110 line input as unicast G.711 A-law RTP while the input 
 
 ## How it works
 
-PipeWire captures `AudioDevice0Input0.Unprocessed`. The app measures the input peak on a 0–100 scale. When it reaches the device's Audio detection level, the app opens a gate after a short activation delay and holds it through brief gaps. While the gate is open it sends 20 ms G.711 A-law packets to the configured IPv4 address and UDP port. When the gate closes, packets stop.
+PipeWire captures `AudioDevice0Input0.Unprocessed`. The app measures the input peak in dBFS. When it reaches the activation level, the app opens a gate after a short activation delay and holds it through brief gaps. While the gate is open it sends 20 ms G.711 A-law packets to the configured IPv4 address and UDP port. When the gate closes, packets stop.
 
-The activation level is the device's own Audio detection setting (`AudioSource.A0.AlarmLevel`). The app reads it over VAPIX every 5 seconds, using the ACAP's VAPIX service account, so the level trigger works without anyone opening the settings page. If that read fails, the app falls back to the last known value, which the settings page also reports.
+The activation level is this app's own setting, `ThresholdDb`, from −90 to 0 dBFS in 1 dB steps. The gate closes once the peak drops below the activation level minus `MarginDb`. That closing level never goes below −90 dBFS, which is where silence on the C8110 sits. Before 1.6.0 the activation level followed the device's Audio detection setting, a whole number from 0 to 100 on a linear scale. That setting couldn't go below about −40 dBFS, so quiet microphone sources never triggered.
 
 Parameter reads and writes run on a separate control thread, so a save never stalls audio capture. If the PipeWire stream fails, or delivers no audio for 5 seconds, the app rebuilds it with a backoff of 1 to 30 seconds. If the PipeWire daemon goes away, the app exits so AXIS OS respawns it.
 
@@ -20,25 +20,25 @@ Parameter reads and writes run on a separate control thread, so a save never sta
 
 The page at `/local/lineinrtp/` has three parts:
 
-- **Live chart.** The last 24 seconds of input peak level in dBFS, from −60 to 0 dB, so quiet and loud sources are both readable. Lines mark where the gate opens and closes, and a timeline below shows what was actually sent. Dark green is opening, with a caret where the trigger started. Light green is sending. Amber is holding: still sending while the release hold counts down. Purple is the max-on limit re-arming. The bars use the same time scale and width as the graph at any page size. In I/O-port mode the chart shows the port state instead.
+- **Live chart.** The last 24 seconds of input peak level in dBFS, from −90 to 0 dB, so quiet and loud sources are both readable. Lines mark where the gate opens and closes, and a timeline below shows what was actually sent. Dark green is opening, with a caret where the trigger started. Light green is sending. Amber is holding: still sending while the release hold counts down. Purple is the max-on limit re-arming. The bars use the same time scale and width as the graph at any page size. In I/O-port mode the chart shows the port state instead.
 - **Input settings and hints.** The page reads the device's audio input type and gain (`AudioSource.A0.InputType` and `InputGain`) and shows them beside the chart. It shows a hint for a faint signal (loudest peak between −75 and −45 dBFS over 10 s) or a clipping one, worded for the current input type. Silence on the C8110 sits near −90 dBFS, so a quiet room doesn't trigger the hint.
 - **Preview.** Moving any setting replays the recorded input with the unsaved values and shows the result as a second timeline, before you save.
 - **One Mode control.** Off, Auto, Always on, and Test tone replace the separate Enabled, Force on, and Test mode switches. The trigger choice (audio level, I/O port 1, I/O port 2) shows only in Auto.
 
-The activation level slider writes the device's Audio detection setting, so it can be set from either page. It stays on the device's 0–100 scale, and the page shows its dBFS equivalent; for example, 12 is −18.4 dBFS peak. "Saved" only appears after the app has written the values and read them back.
+The activation level slider runs from −90 to 0 dBFS. The release margin slider runs from 0 to 40 dB, but its top end shrinks as the activation level nears −90, so the closing level stays at or above the floor. Lowering the activation level pulls the margin down with it when needed. "Saved" only appears after the app has written the values and read them back.
 
 ## Build
 
 ```bash
 for ARCH in armv7hf aarch64; do
-  docker build --platform linux/amd64 --build-arg ARCH=$ARCH -t lineinrtp:1.5.2-$ARCH .
-  id=$(docker create lineinrtp:1.5.2-$ARCH)
-  docker cp "$id":/opt/app/Line_Input_RTP_1_5_2_$ARCH.eap .
+  docker build --platform linux/amd64 --build-arg ARCH=$ARCH -t lineinrtp:1.6.0-$ARCH .
+  id=$(docker create lineinrtp:1.6.0-$ARCH)
+  docker cp "$id":/opt/app/Line_Input_RTP_1_6_0_$ARCH.eap .
   docker rm "$id"
 done
 ```
 
-`acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_5_2_armv7hf.eap`.
+`acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_6_0_armv7hf.eap`.
 
 ## Signing
 
@@ -49,7 +49,7 @@ Release packages are signed with the Axis ACAP Signing Service (https://www.axis
 Signed releases install on AXIS OS 12 and 13 without changing any device setting:
 
 ```bash
-curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_5_2_armv7hf.eap \
+curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_6_0_armv7hf.eap \
   "https://$DEVICE/axis-cgi/applications/upload.cgi"
 ```
 
@@ -85,8 +85,8 @@ Set the jack to line input on the device Audio page before trusting the threshol
 | Trigger | level | `level` (default), `port1`, or `port2`. A port uses that input instead of the audio level |
 | DestinationIp | empty | Unicast IPv4 address of the RTP listener. Multicast, 240.0.0.0/4, and 0.0.0.0/8 are rejected |
 | DestinationPort | 49000 | UDP port |
-| ThresholdDb | unused | Activation level is the device Audio detection setting, 0–100 |
-| MarginDb | 6 | Close the gate this many dB below the activation level |
+| ThresholdDb | -45 | Activation level in dBFS peak, −90 to 0 |
+| MarginDb | 6 | Close the gate this many dB below the activation level, 0 to 40. The closing level never goes below −90 dBFS |
 | ActivationDelayMs | 200 | How long the trigger must stay active |
 | DeactivationDelayS | 2 | How long it must stay quiet |
 | MaxOnS | 0 | Force off after this many seconds. 0 disables the limit |
@@ -95,7 +95,6 @@ Set the jack to line input on the device Audio page before trusting the threshol
 `GET /local/lineinrtp/api/status` returns level, gate, packet counts, and the last error. It also returns:
 
 - `history`: 100 ms entries of peak level (0–100 linear, fractional), gate code, and port states. Gate codes: 0 idle, 1 opening, 2 sending, 3 holding, 4 max-on re-arming, 5 test tone.
-- `alarmSource`: `device`, `page`, `cached`, or `none`.
 - `configRev` and `configError`.
 
 `POST /local/lineinrtp/api/config` saves the fields above. The reply carries a `rev`, and the save is complete once `/api/status` reports `configRev` at or above that value. Status is viewer. Configuration is admin.
