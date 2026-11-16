@@ -19,18 +19,21 @@
       --accent: #1f5fd6;
       --accent-ink: #1a4fb5;
       --accent-soft: #e6eefc;
-      --thr: #c2410c;
-      --thr-ink: #9a3412;
+      --thr: #1e7a46;
+      --thr-ink: #14532d;
       --rel: #e8935f;
       --bad: #b42318;
       --warn-bg: #fdf1ea;
       --warn-line: #f3c9b0;
       --warn-ink: #7a2a08;
-      /* Timeline lanes: green sending, yellow opening/holding, red blocked. */
-      --lane-send: #2e9e5b;
-      --lane-hold: #e0a800;
-      --lane-open: #f5e09a;
-      --lane-wait: #d64545;
+      /* Timeline: dark green opening (with a caret), light green sending,
+         amber holding (still sending), purple blocked by max-on time. */
+      --lane-open: #1e7a46;
+      --open-ink: #0f3d24;
+      --lane-send: #7fcf9c;
+      --lane-hold: #f0b429;
+      --lane-wait: #7b4fc9;
+      --rel-ink: #9a3412;
       --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
     }
     * { box-sizing: border-box; }
@@ -48,9 +51,11 @@
     .sub { font-size: 12.5px; color: var(--muted); }
     .chip { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 12px; border-radius: 999px; font-size: 13px; font-weight: 600; background: var(--line-soft); color: var(--ink-2); }
     .chip i { width: 8px; height: 8px; border-radius: 50%; background: #8a93a1; }
-    .chip.send { background: #e3f4ea; color: #1d6b3d; } .chip.send i { background: var(--lane-send); box-shadow: 0 0 0 4px rgba(46,158,91,.2); }
-    .chip.hold { background: #fbf2d3; color: #7a5a00; } .chip.hold i { background: var(--lane-hold); }
-    .chip.wait, .chip.lost { background: var(--warn-bg); color: var(--thr-ink); } .chip.wait i, .chip.lost i { background: var(--lane-wait); }
+    .chip.send { background: #e8f6ee; color: #1d6b3d; } .chip.send i { background: var(--lane-send); box-shadow: 0 0 0 4px rgba(127,207,156,.35); }
+    .chip.open { background: #dcefe3; color: #14532d; } .chip.open i { background: var(--lane-open); }
+    .chip.hold { background: #fdf3d7; color: #7a5300; } .chip.hold i { background: var(--lane-hold); }
+    .chip.wait { background: #f0eafb; color: #5b3a9e; } .chip.wait i { background: var(--lane-wait); }
+    .chip.lost { background: var(--warn-bg); color: var(--warn-ink); } .chip.lost i { background: var(--bad); }
     .savebox { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 13px; color: var(--muted); }
     .btn { height: 36px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--control); background: var(--surface); color: var(--ink); font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
     .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
@@ -71,22 +76,34 @@
     .ln { display: inline-block; width: 16px; border-top: 2px solid var(--thr); }
     .ln.dash { border-top: 2px dashed var(--rel); }
     .ln.port { border-top-color: var(--accent); }
-    .chart { display: flex; gap: 10px; }
-    .yaxis { display: flex; flex-direction: column; justify-content: space-between; height: 220px; font: 11px var(--mono); color: var(--muted); text-align: right; width: 26px; flex: none; }
-    .plotcol { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 8px; }
-    .plot { position: relative; height: 220px; border-radius: 8px; background: var(--sunken); border: 1px solid var(--line-soft); overflow: hidden; }
+    .chart { display: flex; flex-direction: column; gap: 14px; }
+    .crow { display: grid; grid-template-columns: 56px minmax(0, 1fr); column-gap: 10px; align-items: center; }
+    .yaxis { display: flex; flex-direction: column; justify-content: space-between; height: 220px; font: 11px var(--mono); color: var(--muted); text-align: right; }
+    .yaxis span:first-child { transform: translateY(-6px); }
+    .yaxis span:last-child { transform: translateY(6px); }
+    /* outline, not border, so the drawing area is the full width like the bars */
+    .plot { position: relative; height: 220px; border-radius: 8px; background: var(--sunken); outline: 1px solid var(--line-soft); outline-offset: -1px; overflow: hidden; }
     .plot svg { position: absolute; inset: 0; width: 100%; height: 100%; }
     .shade { position: absolute; top: 0; bottom: 0; background: var(--accent); opacity: .08; }
     .hline { position: absolute; left: 0; right: 0; border-top: 2px solid var(--thr); }
     .hline.rel { border-top: 2px dashed var(--rel); }
     .mid { position: absolute; left: 0; right: 0; top: 50%; border-top: 1px solid var(--line-soft); }
     .tag { position: absolute; right: 8px; font-size: 11.5px; font-weight: 600; color: var(--thr-ink); background: var(--surface); border-radius: 4px; padding: 1px 6px; }
-    .lane { display: flex; align-items: center; gap: 10px; }
-    .track { position: relative; flex: 1 1 auto; height: 14px; border-radius: 4px; background: var(--line-soft); overflow: hidden; }
-    .track div { position: absolute; top: 0; bottom: 0; }
-    .lane > span { width: 64px; flex: none; font-size: 12px; font-weight: 600; color: var(--ink-2); }
+    .track { position: relative; height: 14px; }
+    .track .segs { position: absolute; inset: 0; border-radius: 4px; background: var(--line-soft); overflow: hidden; }
+    .track .segs div { position: absolute; top: 0; bottom: 0; }
+    /* Opening marker: a tick past the bar's edges with a caret on top. */
+    .track .mark { position: absolute; top: -4px; bottom: -4px; width: 2px; margin-left: -1px; border-radius: 1px; background: var(--open-ink); }
+    .track .mark::before { content: ""; position: absolute; top: -6px; left: -4px; border-left: 5px solid transparent; border-right: 5px solid transparent; border-top: 6px solid var(--open-ink); }
+    .lane > span { font-size: 12px; font-weight: 600; color: var(--ink-2); text-align: right; }
     .lane.preview > span { color: var(--accent-ink); }
-    .xaxis { display: flex; justify-content: space-between; font: 11px var(--mono); color: var(--muted); padding-right: 74px; }
+    .xaxis .ticks { position: relative; height: 16px; font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+    .xaxis .ticks span { position: absolute; transform: translateX(-50%); }
+    .xaxis .ticks span:nth-child(1) { left: 0; transform: none; }
+    .xaxis .ticks span:nth-child(2) { left: 25%; }
+    .xaxis .ticks span:nth-child(3) { left: 50%; }
+    .xaxis .ticks span:nth-child(4) { left: 75%; }
+    .xaxis .ticks span:nth-child(5) { right: 0; transform: none; }
     .caption { margin: 0; font-size: 13px; color: var(--ink-2); }
     .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 1px; background: var(--line-soft); border: 1px solid var(--line-soft); border-radius: 10px; overflow: hidden; }
     .stat { background: var(--surface); padding: 10px 14px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
@@ -130,7 +147,7 @@
     @media (max-width: 560px) {
       .bar, main { padding-left: 16px; padding-right: 16px; }
       .seg.n4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .xaxis span:nth-child(2), .xaxis span:nth-child(4) { visibility: hidden; }
+      .xaxis .ticks span:nth-child(2), .xaxis .ticks span:nth-child(4) { visibility: hidden; }
     }
   </style>
 </head>
@@ -169,16 +186,16 @@
         <span data-show="level"><i class="ln"></i>Opens</span>
         <span data-show="level"><i class="ln dash"></i>Closes</span>
         <span data-show="port"><i class="ln port"></i><b id="portLegend" style="font-weight:400">I/O port</b></span>
+        <span><i class="sw" style="background:var(--lane-open);box-shadow:inset 2px 0 0 var(--open-ink)"></i>Opening</span>
         <span><i class="sw" style="background:var(--lane-send)"></i>Sending</span>
-        <span><i class="sw" style="background:var(--lane-hold)"></i>Holding</span>
-        <span><i class="sw" style="background:var(--lane-open)"></i>Opening</span>
+        <span><i class="sw" style="background:var(--lane-hold)"></i>Holding, still sending</span>
         <span><i class="sw" style="background:var(--lane-wait)"></i>Max on</span>
         <button type="button" class="btn small" id="pause" aria-pressed="false">Pause</button>
       </div>
     </div>
     <div class="chart">
-      <div class="yaxis" aria-hidden="true"><span>100</span><span>50</span><span>0</span></div>
-      <div class="plotcol">
+      <div class="crow">
+        <div class="yaxis" aria-hidden="true"><span>100</span><span>50</span><span>0</span></div>
         <div class="plot">
           <div id="shade"></div>
           <div class="mid" aria-hidden="true"></div>
@@ -190,12 +207,13 @@
           <div data-show="level" class="hline rel" id="relLine" aria-hidden="true"></div>
           <div data-show="level" class="hline" id="thrLine" aria-hidden="true"></div>
           <span data-show="level" class="tag" id="thrTag" aria-hidden="true" style="transform:translateY(-100%);margin-top:-3px"></span>
-          <span data-show="level" class="tag" id="relTag" aria-hidden="true" style="margin-top:4px;font-weight:500"></span>
+          <span data-show="level" class="tag" id="relTag" aria-hidden="true" style="margin-top:4px;font-weight:500;color:var(--rel-ink)"></span>
         </div>
-        <div class="lane"><div class="track" id="laneSent" role="img"></div><span id="laneSentLabel">Sent</span></div>
-        <div class="lane preview" id="previewRow" hidden><div class="track" id="lanePreview" role="img"></div><span>Preview</span></div>
-        <div class="xaxis" aria-hidden="true"><span>−24 s</span><span>−18 s</span><span>−12 s</span><span>−6 s</span><span>now</span></div>
       </div>
+      <!-- Every row shares one grid template, so the bars span exactly the plot's width. -->
+      <div class="crow lane"><span id="laneSentLabel">Sent</span><div class="track" id="laneSent" role="img"><div class="segs"></div></div></div>
+      <div class="crow lane preview" id="previewRow" hidden><span>Preview</span><div class="track" id="lanePreview" role="img"><div class="segs"></div></div></div>
+      <div class="crow xaxis" aria-hidden="true"><span></span><div class="ticks"><span>−24 s</span><span>−18 s</span><span>−12 s</span><span>−6 s</span><span>now</span></div></div>
     </div>
     <p class="caption" id="caption"></p>
     <div class="stats">
@@ -429,6 +447,20 @@ function paintSegments(el, sim, colors, offset, extraClass) {
   el.replaceChildren(frag);
 }
 
+/* Paints a timeline: coloured segments plus a caret where each opening starts. */
+function paintLane(el, sim, off) {
+  paintSegments(el.querySelector(".segs"), sim, LANE, off);
+  el.querySelectorAll(".mark").forEach((m) => m.remove());
+  sim.forEach((s, i) => {
+    if (s === "pending" && (i === 0 || sim[i - 1] !== "pending")) {
+      const m = document.createElement("div");
+      m.className = "mark";
+      m.style.left = ((off + i) / N * 100).toFixed(2) + "%";
+      el.appendChild(m);
+    }
+  });
+}
+
 function times(n) { return n === 1 ? "1 time" : n + " times"; }
 
 function renderChart(c, dirty) {
@@ -438,19 +470,21 @@ function renderChart(c, dirty) {
   const isAuto = c.mode === "auto";
   const isLevel = isAuto && c.trigger === "level" && c.level !== null;
   const isPort = isAuto && c.trigger !== "level";
-  const x = (i) => ((off + i) / (N - 1) * 1000).toFixed(1);
+  /* Entry i covers [i/N, (i+1)/N] of the width: the same scale as the bars. */
+  const x = (i) => ((off + i + 0.5) / N * 1000).toFixed(1);
+  const edge = (i) => ((off + i) / N * 1000).toFixed(1);
 
   let line = "";
   view.forEach((p, i) => { line += (i ? "L" : "M") + x(i) + " " + (200 - (p.v || 0) * 2).toFixed(1); });
   $("trace").setAttribute("d", line);
-  $("area").setAttribute("d", view.length ? line + "L1000 200L" + x(0) + " 200Z" : "");
+  $("area").setAttribute("d", view.length ? line + "L" + x(view.length - 1) + " 200L" + x(0) + " 200Z" : "");
   let port = "";
   if (isPort && view.length) {
     let prev = null;
     view.forEach((p, i) => {
       const y = (c.trigger === "port1" ? p.p1 : p.p2) === 1 ? 30 : 186;
-      if (prev === null) port += "M" + x(i) + " " + y;
-      else if (prev !== y) port += "L" + x(i) + " " + prev + "L" + x(i) + " " + y;
+      if (prev === null) port += "M" + edge(i) + " " + y;
+      else if (prev !== y) port += "L" + edge(i) + " " + prev + "L" + edge(i) + " " + y;
       prev = y;
     });
     port += "L1000 " + prev;
@@ -476,7 +510,7 @@ function renderChart(c, dirty) {
     if (g === "on" && status && status.forceOn) return "always";
     return g;
   });
-  paintSegments($("laneSent"), real, LANE, off);
+  paintLane($("laneSent"), real, off);
   const dReal = describe(real);
   $("laneSent").setAttribute("aria-label", "Sent: " + dReal.opens + " starts, " + dReal.secs.toFixed(1) + " s in the last 24 s");
   $("laneSentLabel").textContent = dirty ? "Saved" : "Sent";
@@ -485,7 +519,7 @@ function renderChart(c, dirty) {
   if (dirty) {
     const sim = simulate(H, c).slice(-N);
     const dSim = describe(sim);
-    paintSegments($("lanePreview"), sim, LANE, off);
+    paintLane($("lanePreview"), sim, off);
     paintSegments($("shade"), sim, LANE, off, "shade");
     $("lanePreview").setAttribute("aria-label", "Preview: " + dSim.opens + " starts, " + dSim.secs.toFixed(1) + " s");
     caption = "Preview: with your changes, the last " + Math.round(view.length / 10) + " s would have started " + times(dSim.opens) +
@@ -533,8 +567,8 @@ function renderChip() {
     else if (!status.destinationIp) text = "No destination";
     else if (g === "test") { cls = "send"; text = "Sending test tone"; }
     else if (g === "active") { cls = "send"; text = status.forceOn ? "Streaming, always on" : "Streaming"; }
-    else if (g === "holding") { cls = "hold"; text = "Holding"; }
-    else if (g === "pending") { cls = "hold"; text = "Opening"; }
+    else if (g === "holding") { cls = "hold"; text = "Holding, still sending"; }
+    else if (g === "pending") { cls = "open"; text = "Opening"; }
     else if (g === "waiting") { cls = "wait"; text = "Max on time, re-arming"; }
     else text = "Listening";
   }

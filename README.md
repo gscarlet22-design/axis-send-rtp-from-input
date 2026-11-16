@@ -5,8 +5,8 @@ This ACAP sends the C8110 line input as unicast G.711 A-law RTP while the input 
 ## Prerequisites
 
 - AXIS C8110, or another AXIS OS audio device with PipeWire
-- AXIS OS 12.11.72 through 13 (1.4.1 was tested on a C8110 running 12.11.77, `armv7hf`)
-- Docker, for the ACAP Native SDK image `axisecp/acap-native-sdk:12.11.0-armv7hf-ubuntu24.04`
+- AXIS OS 12.11.72 through 13. The C8110 is `armv7hf` (1.4.1 was tested on one running 12.11.77). An `aarch64` build is published for ARTPEC-8 and ARTPEC-9 devices.
+- Docker, for the ACAP Native SDK images `axisecp/acap-native-sdk:12.11.0-<arch>-ubuntu24.04`
 
 ## How it works
 
@@ -20,7 +20,7 @@ Parameter reads and writes run on a separate control thread, so a save never sta
 
 The page at `/local/lineinrtp/` has three parts:
 
-- **Live chart.** The last 24 seconds of input level, with lines where the gate opens and closes, and a timeline of what was actually sent. Green is sending, yellow is opening or holding, red is the max-on limit re-arming. In I/O-port mode the chart shows the port state instead.
+- **Live chart.** The last 24 seconds of input level, with lines where the gate opens and closes, and a timeline of what was actually sent. Dark green is opening, with a caret where the trigger started. Light green is sending. Amber is holding: still sending while the release hold counts down. Purple is the max-on limit re-arming. The bars use the same time scale and width as the graph at any page size. In I/O-port mode the chart shows the port state instead.
 - **Preview.** Moving any setting replays the recorded input with the unsaved values and shows the result as a second timeline, before you save.
 - **One Mode control.** Off, Auto, Always on, and Test tone replace the separate Enabled, Force on, and Test mode switches. The trigger choice (audio level, I/O port 1, I/O port 2) shows only in Auto.
 
@@ -29,24 +29,26 @@ The activation level slider writes the device's Audio detection setting, so it c
 ## Build
 
 ```bash
-docker build --platform linux/amd64 --build-arg ARCH=armv7hf -t lineinrtp:1.5.0 .
-id=$(docker create lineinrtp:1.5.0)
-docker cp "$id":/opt/app/Line_Input_RTP_1_5_0_armv7hf.eap .
-docker rm "$id"
+for ARCH in armv7hf aarch64; do
+  docker build --platform linux/amd64 --build-arg ARCH=$ARCH -t lineinrtp:1.5.1-$ARCH .
+  id=$(docker create lineinrtp:1.5.1-$ARCH)
+  docker cp "$id":/opt/app/Line_Input_RTP_1_5_1_$ARCH.eap .
+  docker rm "$id"
+done
 ```
 
-`acap-build` names the package from the friendly name: `Line_Input_RTP_1_5_0_armv7hf.eap`.
+`acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_5_1_armv7hf.eap`.
 
 ## Signing
 
-Release packages are signed with the Axis ACAP Signing Service (https://www.axis.com/support/acap-signing). The service only signs a package whose `vendor` and `vendorId` match the signing account, so `app/manifest.json` carries that account's values. Signing appends a PGP signature to the unsigned `.eap`. Rebuild and re-sign for every release.
+Release packages are signed with the Axis ACAP Signing Service (https://www.axis.com/support/acap-signing). The service only signs a package whose `vendor` and `vendorId` match the signing account, so `app/manifest.json` carries that account's values. Signing appends a PGP signature to the unsigned `.eap`. Sign each architecture's package separately, and rebuild and re-sign for every release.
 
 ## Install
 
 Signed releases install on AXIS OS 12 and 13 without changing any device setting:
 
 ```bash
-curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_5_0_armv7hf.eap \
+curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_5_1_armv7hf.eap \
   "https://$DEVICE/axis-cgi/applications/upload.cgi"
 ```
 
