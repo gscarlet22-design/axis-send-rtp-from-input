@@ -1,0 +1,8 @@
+*.eap
+*.o
+.env.devices
+.git
+learnings
+tools
+README.md
+LICENSE

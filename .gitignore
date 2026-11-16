@@ -1,0 +1,11 @@
+*.eap
+*.o
+.env.devices
+build/
+app/debug/
+app/*.eap
+app/*_LICENSE.txt
+app/package.conf
+app/param.conf
+learnings/
+tools/force-on.json

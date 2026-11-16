@@ -1,0 +1,108 @@
+{
+    "schemaVersion": "2.2.0",
+    "resources": {
+        "linux": {
+            "user": {
+                "groups": ["pipewire"]
+            }
+        }
+    },
+    "acapPackageConf": {
+        "setup": {
+            "friendlyName": "Line Input RTP",
+            "appName": "lineinrtp",
+            "vendor": "mrdnlabs.pro",
+            "vendorId": "4E49414E47",
+            "runMode": "respawn",
+            "version": "1.4.1",
+            "compatibleOsVersions": [
+                {
+                    "min": "12.11.72",
+                    "max": "13"
+                }
+            ]
+        },
+        "configuration": {
+            "settingPage": "index.html",
+            "reverseProxy": [
+                {
+                    "apiPath": "api/status",
+                    "target": "http://127.0.0.1:2011",
+                    "access": "viewer"
+                },
+                {
+                    "apiPath": "api/config",
+                    "target": "http://127.0.0.1:2011",
+                    "access": "admin"
+                }
+            ],
+            "paramConfig": [
+                {
+                    "name": "Enabled",
+                    "default": "no",
+                    "type": "bool:no,yes"
+                },
+                {
+                    "name": "ForceOn",
+                    "default": "no",
+                    "type": "bool:no,yes"
+                },
+                {
+                    "name": "TestMode",
+                    "default": "no",
+                    "type": "bool:no,yes"
+                },
+                {
+                    "name": "Trigger",
+                    "default": "level",
+                    "type": "string"
+                },
+                {
+                    "name": "DestinationIp",
+                    "default": "",
+                    "type": "string"
+                },
+                {
+                    "name": "DestinationPort",
+                    "default": "49000",
+                    "type": "int:1,65535"
+                },
+                {
+                    "name": "ThresholdDb",
+                    "default": "-45",
+                    "type": "int:-90,0"
+                },
+                {
+                    "name": "MarginDb",
+                    "default": "6",
+                    "type": "int:0,40"
+                },
+                {
+                    "name": "ActivationDelayMs",
+                    "default": "200",
+                    "type": "int:0,10000"
+                },
+                {
+                    "name": "DeactivationDelayS",
+                    "default": "2",
+                    "type": "int:0,60"
+                },
+                {
+                    "name": "MaxOnS",
+                    "default": "0",
+                    "type": "int:0,3600"
+                },
+                {
+                    "name": "CachedAlarmLevel",
+                    "default": "-1",
+                    "type": "int:-1,100"
+                },
+                {
+                    "name": "InputNode",
+                    "default": "AudioDevice0Input0.Unprocessed",
+                    "type": "string"
+                }
+            ]
+        }
+    }
+}
