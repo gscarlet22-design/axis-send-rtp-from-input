@@ -20,24 +20,25 @@ Parameter reads and writes run on a separate control thread, so a save never sta
 
 The page at `/local/lineinrtp/` has three parts:
 
-- **Live chart.** The last 24 seconds of input level, with lines where the gate opens and closes, and a timeline of what was actually sent. Dark green is opening, with a caret where the trigger started. Light green is sending. Amber is holding: still sending while the release hold counts down. Purple is the max-on limit re-arming. The bars use the same time scale and width as the graph at any page size. In I/O-port mode the chart shows the port state instead.
+- **Live chart.** The last 24 seconds of input peak level in dBFS, from −60 to 0 dB, so quiet and loud sources are both readable. Lines mark where the gate opens and closes, and a timeline below shows what was actually sent. Dark green is opening, with a caret where the trigger started. Light green is sending. Amber is holding: still sending while the release hold counts down. Purple is the max-on limit re-arming. The bars use the same time scale and width as the graph at any page size. In I/O-port mode the chart shows the port state instead.
+- **Input settings and hints.** The page reads the device's audio input type and gain (`AudioSource.A0.InputType` and `InputGain`) and shows them beside the chart. It shows a hint for a faint signal (loudest peak between −75 and −45 dBFS over 10 s) or a clipping one, worded for the current input type. Silence on the C8110 sits near −90 dBFS, so a quiet room doesn't trigger the hint.
 - **Preview.** Moving any setting replays the recorded input with the unsaved values and shows the result as a second timeline, before you save.
 - **One Mode control.** Off, Auto, Always on, and Test tone replace the separate Enabled, Force on, and Test mode switches. The trigger choice (audio level, I/O port 1, I/O port 2) shows only in Auto.
 
-The activation level slider writes the device's Audio detection setting, so it can be set from either page. "Saved" only appears after the app has written the values and read them back.
+The activation level slider writes the device's Audio detection setting, so it can be set from either page. It stays on the device's 0–100 scale, and the page shows its dBFS equivalent; for example, 12 is −18.4 dBFS peak. "Saved" only appears after the app has written the values and read them back.
 
 ## Build
 
 ```bash
 for ARCH in armv7hf aarch64; do
-  docker build --platform linux/amd64 --build-arg ARCH=$ARCH -t lineinrtp:1.5.1-$ARCH .
-  id=$(docker create lineinrtp:1.5.1-$ARCH)
-  docker cp "$id":/opt/app/Line_Input_RTP_1_5_1_$ARCH.eap .
+  docker build --platform linux/amd64 --build-arg ARCH=$ARCH -t lineinrtp:1.5.2-$ARCH .
+  id=$(docker create lineinrtp:1.5.2-$ARCH)
+  docker cp "$id":/opt/app/Line_Input_RTP_1_5_2_$ARCH.eap .
   docker rm "$id"
 done
 ```
 
-`acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_5_1_armv7hf.eap`.
+`acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_5_2_armv7hf.eap`.
 
 ## Signing
 
@@ -48,7 +49,7 @@ Release packages are signed with the Axis ACAP Signing Service (https://www.axis
 Signed releases install on AXIS OS 12 and 13 without changing any device setting:
 
 ```bash
-curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_5_1_armv7hf.eap \
+curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_5_2_armv7hf.eap \
   "https://$DEVICE/axis-cgi/applications/upload.cgi"
 ```
 
@@ -93,7 +94,7 @@ Set the jack to line input on the device Audio page before trusting the threshol
 
 `GET /local/lineinrtp/api/status` returns level, gate, packet counts, and the last error. It also returns:
 
-- `history`: 100 ms entries of peak level, gate code, and port states. Gate codes: 0 idle, 1 opening, 2 sending, 3 holding, 4 max-on re-arming, 5 test tone.
+- `history`: 100 ms entries of peak level (0–100 linear, fractional), gate code, and port states. Gate codes: 0 idle, 1 opening, 2 sending, 3 holding, 4 max-on re-arming, 5 test tone.
 - `alarmSource`: `device`, `page`, `cached`, or `none`.
 - `configRev` and `configError`.
 

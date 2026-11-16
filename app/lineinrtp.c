@@ -129,7 +129,7 @@ struct status_snap {
     unsigned buffered_samples;
     uint32_t hist_seq;
     unsigned hist_count;
-    uint8_t hist_level[HIST_LEN];
+    float hist_level[HIST_LEN];
     uint8_t hist_gate[HIST_LEN];
     int8_t hist_port1[HIST_LEN];
     int8_t hist_port2[HIST_LEN];
@@ -184,7 +184,7 @@ static int g_retry_ms = RETRY_MIN_MS;
 static int64_t g_last_process_ms;
 static int64_t g_connected_ms;
 static int g_exit_code = EXIT_SUCCESS;
-static uint8_t g_hist_level[HIST_LEN];
+static float g_hist_level[HIST_LEN];
 static uint8_t g_hist_gate[HIST_LEN];
 static int8_t g_hist_port1[HIST_LEN];
 static int8_t g_hist_port2[HIST_LEN];
@@ -957,7 +957,7 @@ static void record_history(int64_t now, const char* gate) {
     }
     peak = g_hist_peak < 0.0 ? 0.0 : g_hist_peak > 100.0 ? 100.0 : g_hist_peak;
     idx  = (unsigned)(g_hist_seq % HIST_LEN);
-    g_hist_level[idx] = (uint8_t)lrint(peak);
+    g_hist_level[idx] = (float)peak; /* fractional: quiet input stays visible on a dB scale */
     g_hist_gate[idx]  = gate_code(gate);
     g_hist_port1[idx] = (int8_t)port_is_active(1);
     g_hist_port2[idx] = (int8_t)port_is_active(2);
@@ -1454,7 +1454,7 @@ static char* status_json(void) {
     hist_port1 = json_array();
     hist_port2 = json_array();
     for (i = 0; i < snap.hist_count; i++) {
-        json_array_append_new(hist_level, json_integer(snap.hist_level[i]));
+        json_array_append_new(hist_level, json_real(floor((double)snap.hist_level[i] * 1000.0 + 0.5) / 1000.0));
         json_array_append_new(hist_gate, json_integer(snap.hist_gate[i]));
         json_array_append_new(hist_port1, json_integer(snap.hist_port1[i]));
         json_array_append_new(hist_port2, json_integer(snap.hist_port2[i]));
