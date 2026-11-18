@@ -27,6 +27,8 @@ The page at `/local/lineinrtp/` has three parts:
 - **Preview.** Moving any setting replays the recorded input with the unsaved values and shows the result as a second timeline, before you save.
 - **One Mode control.** Off, Auto, Always on, and Test tone replace the separate Enabled, Force on, and Test mode switches. The trigger choice (audio level, I/O port 1, I/O port 2) shows only in Auto.
 
+In a window 900 px or wider, the chart stays in view on the left while the settings scroll on the right, so you can watch the preview as you move a slider. The header with Save stays at the top at any width.
+
 You can drag the Opens and Closes lines on the chart directly. Dragging one line leaves the other in place unless it has to move to keep the margin between 0 and 40 dB. Hold Shift to move both lines together, and press Esc to cancel a drag. Each line can also take keyboard focus: the arrow keys move it 1 dB, Page Up and Page Down move it 6 dB.
 
 The activation level slider runs from −90 to 0 dBFS. The release margin slider runs from 0 to 40 dB, but its top end shrinks as the activation level nears −90, so the closing level stays at or above the floor. Lowering the activation level pulls the margin down with it when needed. "Saved" only appears after the app has written the values and read them back.
