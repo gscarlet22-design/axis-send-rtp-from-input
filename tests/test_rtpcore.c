@@ -124,11 +124,14 @@ static void test_valid_ipv4(void) {
     CHECK(valid_ipv4("10.0.0.1"));
     CHECK(valid_ipv4("1.0.0.0"));
     CHECK(valid_ipv4("223.255.255.254"));
+    CHECK(valid_ipv4("192.168.1.255")); /* may be a host on a wider subnet */
 
     CHECK(!valid_ipv4(NULL));
     CHECK(!valid_ipv4(""));
     CHECK(!valid_ipv4("0.0.0.0"));
     CHECK(!valid_ipv4("0.1.2.3"));
+    CHECK(!valid_ipv4("127.0.0.1")); /* loopback: would send to the camera itself */
+    CHECK(!valid_ipv4("127.255.255.254"));
     CHECK(!valid_ipv4("224.0.0.1"));       /* multicast */
     CHECK(!valid_ipv4("239.255.255.250")); /* multicast */
     CHECK(!valid_ipv4("240.0.0.1"));       /* reserved */
@@ -587,6 +590,219 @@ static void test_gate_stop_helper(void) {
     CHECK(!gate_stop(&g));
 }
 
+/* Disabling while the activation delay runs abandons it: the page shows
+ * "inactive", and re-enabling waits the full delay again. */
+static void test_gate_disable_forgets_pending(void) {
+    struct gate g;
+    struct gate_input in = base_input();
+
+    memset(&g, 0, sizeof g);
+    in.level_percent = pct(-30.0);
+    CHECK(gate_step(&g, &in, 1000).action == GATE_NONE);
+    CHECK_STR(gate_state(&g, false), "pending");
+    in.enabled = false;
+    CHECK(gate_step(&g, &in, 1100).action == GATE_NONE);
+    CHECK(g.hot_since == 0);
+    CHECK_STR(gate_state(&g, false), "inactive");
+    in.enabled = true;
+    CHECK(gate_step(&g, &in, 5000).action == GATE_NONE);
+    CHECK(gate_step(&g, &in, 5190).action == GATE_NONE);
+    CHECK(gate_step(&g, &in, 5200).action == GATE_START);
+
+    /* Same for losing the capture stream. */
+    memset(&g, 0, sizeof g);
+    CHECK(gate_step(&g, &in, 1000).action == GATE_NONE);
+    in.format_ready = false;
+    CHECK(gate_step(&g, &in, 1010).action == GATE_NONE);
+    CHECK_STR(gate_state(&g, false), "inactive");
+}
+
+/* ---------------------------------------------------------------- RTP */
+
+static uint32_t header_ts(const uint8_t* h) {
+    return ((uint32_t)h[4] << 24) | ((uint32_t)h[5] << 16) | ((uint32_t)h[6] << 8) | h[7];
+}
+
+static void test_rtp_header_layout(void) {
+    struct rtp_tx tx;
+    uint8_t h[RTP_HEADER_LEN];
+
+    rtp_tx_init(&tx, 0x1234, 0xA1B2C3D4, 0xDEADBEEF);
+    rtp_tx_header(&tx, h);
+    CHECK(h[0] == 0x80);        /* V=2, P=0, X=0, CC=0 */
+    CHECK(h[1] == (0x80 | 8));  /* marker on the first packet, PT 8 = PCMA */
+    CHECK(h[2] == 0x12 && h[3] == 0x34);
+    CHECK(h[4] == 0xA1 && h[5] == 0xB2 && h[6] == 0xC3 && h[7] == 0xD4);
+    CHECK(h[8] == 0xDE && h[9] == 0xAD && h[10] == 0xBE && h[11] == 0xEF);
+
+    rtp_tx_advance(&tx, 160);
+    rtp_tx_header(&tx, h);
+    CHECK(h[1] == 8); /* marker only on the first packet of a talkspurt */
+    CHECK(h[2] == 0x12 && h[3] == 0x35);
+    CHECK(header_ts(h) == 0xA1B2C3D4u + 160u);
+}
+
+static void test_rtp_sequence_and_timestamp_wrap(void) {
+    struct rtp_tx tx;
+
+    rtp_tx_init(&tx, 0xFFFF, 0xFFFFFFF0u, 1);
+    rtp_tx_advance(&tx, 160);
+    CHECK(tx.seq == 0);
+    CHECK(tx.timestamp == 0x90u);
+}
+
+/* AUDIT.md M1: after a quiet gap the timestamp jumps by the gap, less the
+ * pre-roll that was captured before the gate opened. */
+static void test_rtp_timestamp_tracks_silence(void) {
+    struct rtp_tx tx;
+    int i;
+
+    rtp_tx_init(&tx, 100, 1000, 7);
+    rtp_tx_talkspurt(&tx, 5000, 1600); /* first talkspurt: nothing to skip */
+    CHECK(tx.timestamp == 1000);
+    CHECK(tx.marker);
+    for (i = 0; i < 5; i++) {
+        rtp_tx_advance(&tx, 160);
+    }
+    CHECK(tx.timestamp == 1800);
+    CHECK(!tx.marker);
+
+    rtp_tx_stop(&tx, 10000);
+    rtp_tx_talkspurt(&tx, 13000, 1600); /* 3 s gap = 24,000 samples, 1,600 of them pre-roll */
+    CHECK(tx.timestamp == 1800 + 24000 - 1600);
+    CHECK(tx.marker);
+    CHECK(tx.seq == 105); /* sequence numbers don't skip: no packets were lost */
+
+    /* A gap shorter than the pre-roll leaves the timestamp alone. */
+    rtp_tx_stop(&tx, 20000);
+    rtp_tx_talkspurt(&tx, 20100, 1600);
+    CHECK(tx.timestamp == 1800 + 24000 - 1600);
+
+    /* Long gaps wrap modulo 2^32. */
+    rtp_tx_init(&tx, 0, 0xFFFFFF00u, 7);
+    rtp_tx_stop(&tx, 0);
+    rtp_tx_talkspurt(&tx, 1000, 0);
+    CHECK(tx.timestamp == (uint32_t)(0xFFFFFF00u + 8000u));
+}
+
+/* AUDIT.md M8: the tone follows wall-clock time, not the number of ticks. */
+static void test_clock_samples_due(void) {
+    CHECK(clock_samples_due(1000, 1000, 8000, 0) == 0);
+    CHECK(clock_samples_due(1000, 990, 8000, 0) == 0);
+    CHECK(clock_samples_due(1000, 1010, 8000, 0) == 80);
+    CHECK(clock_samples_due(1000, 1010, 8000, 80) == 0);
+    CHECK(clock_samples_due(1000, 1037, 8000, 80) == 216);
+    CHECK(clock_samples_due(1000, 1000 + 3600000, 8000, 0) == 28800000u);
+    CHECK(clock_samples_due(1000, 1010, 8000, 500) == 0);
+}
+
+/* ---------------------------------------------------------------- decimator */
+
+static struct decimator g_dec;
+
+/* Gain in dB for a sine of `freq` Hz at `rate` Hz, after the filter settles. */
+static double decimator_gain_db(unsigned rate, double freq) {
+    const double pi = 3.14159265358979323846;
+    const double amp = 0.5;
+    unsigned n;
+    unsigned outputs = 0;
+    float peak       = 0.f;
+
+    if (!decimator_init(&g_dec, rate)) {
+        return 999.0;
+    }
+    for (n = 0; n < rate; n++) { /* one second */
+        float out;
+        if (decimator_push(&g_dec, (float)(amp * sin(2.0 * pi * freq * n / rate)), &out)) {
+            outputs++;
+            if (outputs > (unsigned)g_dec.taps && fabsf(out) > peak) {
+                peak = fabsf(out);
+            }
+        }
+    }
+    return peak > 0.f ? 20.0 * log10(peak / amp) : -200.0;
+}
+
+static void test_decimator_rates(void) {
+    CHECK(decimator_init(&g_dec, 48000) && g_dec.factor == 6 && g_dec.taps == 217);
+    CHECK(decimator_init(&g_dec, 16000) && g_dec.factor == 2);
+    CHECK(decimator_init(&g_dec, 192000) && g_dec.factor == 24 && g_dec.taps == DECIM_MAX_TAPS);
+    CHECK(decimator_init(&g_dec, 8000) && g_dec.factor == 1 && g_dec.taps == 1);
+    CHECK(!decimator_init(&g_dec, 44100) && g_dec.factor == 0);
+    CHECK(!decimator_init(&g_dec, 0));
+    CHECK(!decimator_init(&g_dec, 4000));
+    CHECK(!decimator_init(&g_dec, 200000));
+}
+
+static void test_decimator_output_rate(void) {
+    unsigned n;
+    unsigned outputs = 0;
+    float out;
+
+    CHECK(decimator_init(&g_dec, 48000));
+    for (n = 0; n < 48000; n++) {
+        if (decimator_push(&g_dec, 0.f, &out)) {
+            outputs++;
+        }
+    }
+    CHECK(outputs == 8000);
+
+    memset(&g_dec, 0, sizeof g_dec);
+    CHECK(!decimator_push(&g_dec, 1.f, &out)); /* unconfigured: no output */
+}
+
+static void test_decimator_dc_and_reset(void) {
+    unsigned n;
+    float out  = 0.f;
+    float last = 0.f;
+
+    CHECK(decimator_init(&g_dec, 48000));
+    for (n = 0; n < 4800; n++) {
+        if (decimator_push(&g_dec, 0.25f, &out)) {
+            last = out;
+        }
+    }
+    CHECK(fabsf(last - 0.25f) < 1e-4f);
+
+    decimator_reset(&g_dec);
+    for (n = 0; n < 6; n++) {
+        if (decimator_push(&g_dec, 0.f, &out)) {
+            last = out;
+        }
+    }
+    CHECK(fabsf(last) < 1e-9f);
+}
+
+/* AUDIT.md M4. The old 6-sample average passed 5 kHz at about -6 dB, which
+ * aliased it to 3 kHz. */
+static void test_decimator_response_48k(void) {
+    double g1k  = decimator_gain_db(48000, 1000.0);
+    double g3k  = decimator_gain_db(48000, 3000.0);
+    double g5k  = decimator_gain_db(48000, 5000.0);
+    double g7k  = decimator_gain_db(48000, 7000.0);
+    double g12k = decimator_gain_db(48000, 12000.0);
+    double g20k = decimator_gain_db(48000, 20000.0);
+
+    printf("  48 kHz: 1k %.2f dB, 3k %.2f, 5k %.1f, 7k %.1f, 12k %.1f, 20k %.1f\n", g1k, g3k, g5k, g7k, g12k, g20k);
+    CHECK(fabs(g1k) < 0.1);
+    CHECK(fabs(g3k) < 0.5);
+    CHECK(g5k < -60.0);
+    CHECK(g7k < -60.0);
+    CHECK(g12k < -60.0);
+    CHECK(g20k < -60.0);
+}
+
+static void test_decimator_response_16k(void) {
+    double g1k = decimator_gain_db(16000, 1000.0);
+    double g5k = decimator_gain_db(16000, 5000.0);
+    double g7k = decimator_gain_db(16000, 7000.0);
+
+    printf("  16 kHz: 1k %.2f dB, 5k %.1f, 7k %.1f\n", g1k, g5k, g7k);
+    CHECK(fabs(g1k) < 0.1);
+    CHECK(g5k < -60.0);
+    CHECK(g7k < -60.0);
+}
+
 int main(void) {
     test_alaw_known_values();
     test_alaw_codes_round_trip();
@@ -610,6 +826,16 @@ int main(void) {
     test_gate_no_capture();
     test_gate_port_trigger();
     test_gate_stop_helper();
+    test_gate_disable_forgets_pending();
+    test_rtp_header_layout();
+    test_rtp_sequence_and_timestamp_wrap();
+    test_rtp_timestamp_tracks_silence();
+    test_clock_samples_due();
+    test_decimator_rates();
+    test_decimator_output_rate();
+    test_decimator_dc_and_reset();
+    test_decimator_response_48k();
+    test_decimator_response_16k();
 
     if (g_failures != 0) {
         fprintf(stderr, "FAILED: %d of %d checks\n", g_failures, g_checks);

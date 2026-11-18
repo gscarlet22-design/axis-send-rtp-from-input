@@ -298,7 +298,7 @@
             <input type="number" id="port" min="1" max="65535">
           </label>
         </div>
-        <p class="err" id="ipErr" hidden>Use a unicast IPv4 address, such as 192.168.1.10. Multicast and broadcast are not sent.</p>
+        <p class="err" id="ipErr" hidden>Use a unicast IPv4 address, such as 192.168.1.10. Multicast, broadcast and loopback are not sent.</p>
         <div class="field" style="gap:6px">
           <span class="flabel">Source URL for Audio Manager Pro</span>
           <div class="urlrow">
@@ -364,7 +364,7 @@ function validIp(ip) {
   if (!m) return false;
   const p = m.slice(1).map(Number);
   if (p.some((x, i) => x > 255 || String(x) !== m[i + 1])) return false;
-  return p[0] !== 0 && p[0] < 224;
+  return p[0] !== 0 && p[0] !== 127 && p[0] < 224;
 }
 
 function cfgFromStatus(s) {

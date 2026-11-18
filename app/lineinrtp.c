@@ -163,7 +163,6 @@ static struct ctl_update g_ctl;
 static unsigned g_cfg_rev_requested;
 static struct status_snap g_status;
 /* Main loop only. */
-static char g_shown_cfg_error[160];
 static unsigned g_cfg_rev_applied;
 static char g_cfg_save_error[160];
 static bool g_stream_failed;
@@ -181,12 +180,10 @@ static int64_t g_hist_next_ms;
 static double g_hist_peak;
 static struct cfg g_cfg;
 static struct gate g_gate;
-static bool g_marker = true;
+static struct rtp_tx g_rtp;
 static double g_level_db = -120.0;
 static double g_level_percent;
-static int g_decim;
-static float g_acc;
-static int g_acc_n;
+static struct decimator g_decim;
 static int16_t g_ring[RING_CAP];
 static unsigned g_ring_r;
 static unsigned g_ring_w;
@@ -194,16 +191,14 @@ static unsigned g_ring_count;
 static int g_rtp_fd = -1;
 static char g_rtp_ip[64];
 static int g_rtp_port;
-static uint16_t g_seq;
-static uint32_t g_timestamp;
-static uint32_t g_ssrc;
 static uint64_t g_packets_sent;
 static uint64_t g_send_errors;
 static uint64_t g_samples_dropped;
-static char g_last_error[160];
 static char g_last_rtp_header[25];
 static bool g_logged_bad_format;
 static double g_tone_phase;
+static int64_t g_tone_start_ms;
+static uint64_t g_tone_produced;
 static volatile sig_atomic_t g_port_active[3] = {-1, -1, -1};
 static volatile sig_atomic_t g_port_numbering;
 static GMainLoop* g_event_loop;
@@ -227,8 +222,48 @@ static int64_t now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static void set_error(const char* text) {
-    snprintf(g_last_error, sizeof g_last_error, "%s", text != NULL ? text : "");
+/* One error slot per subsystem, each cleared when that subsystem recovers.
+ * /api/status reports the first one set, in this order. Main loop only. */
+enum err_slot { ERR_CONFIG, ERR_CAPTURE, ERR_NETWORK, ERR_SLOTS };
+static char g_errors[ERR_SLOTS][160];
+
+static void set_error(enum err_slot slot, const char* text) {
+    snprintf(g_errors[slot], sizeof g_errors[slot], "%s", text != NULL ? text : "");
+}
+
+static void clear_error(enum err_slot slot) {
+    g_errors[slot][0] = '\0';
+}
+
+static const char* current_error(void) {
+    int i;
+
+    for (i = 0; i < ERR_SLOTS; i++) {
+        if (g_errors[i][0] != '\0') {
+            return g_errors[i];
+        }
+    }
+    return "";
+}
+
+/* RTP wants an unpredictable initial sequence number, timestamp and SSRC
+ * (RFC 3550 5.1, 8.1). Falls back to the clock if /dev/urandom is missing. */
+static void random_bytes(void* out, size_t len) {
+    FILE* f = fopen("/dev/urandom", "rb");
+    size_t got = 0;
+
+    if (f != NULL) {
+        got = fread(out, 1, len, f);
+        fclose(f);
+    }
+    if (got != len) {
+        uint64_t seed = (uint64_t)now_ms() * 6364136223846793005ULL + (uint64_t)getpid();
+        size_t i;
+        for (i = 0; i < len; i++) {
+            seed                  = seed * 6364136223846793005ULL + 1442695040888963407ULL;
+            ((uint8_t*)out)[i] = (uint8_t)(seed >> 56);
+        }
+    }
 }
 
 static int param_int(AXParameter* handle, const char* name, int fallback, int min_v, int max_v) {
@@ -387,15 +422,17 @@ static void clear_ring(void) {
     g_ring_r     = 0;
     g_ring_w     = 0;
     g_ring_count = 0;
-    g_acc        = 0.f;
-    g_acc_n      = 0;
 }
 
+/* While the gate is closed the ring is the pre-roll buffer, and losing its
+ * oldest samples is expected. Only an overrun while sending counts as dropped. */
 static void push_pcm(int16_t sample) {
     if (g_ring_count == RING_CAP) {
         g_ring_r = (g_ring_r + 1U) % RING_CAP;
         g_ring_count--;
-        g_samples_dropped++;
+        if (g_gate.streaming) {
+            g_samples_dropped++;
+        }
     }
     g_ring[g_ring_w] = sample;
     g_ring_w         = (g_ring_w + 1U) % RING_CAP;
@@ -504,21 +541,29 @@ static void* event_thread(void* unused) {
 static void streaming_stopped(const char* reason) {
     syslog(LOG_INFO, "RTP stopped (%s), level %.1f dBFS, packets %llu", reason, g_level_db,
            (unsigned long long)g_packets_sent);
-    g_marker = true;
+    rtp_tx_stop(&g_rtp, now_ms());
     clear_ring();
 }
 
+/* Keeps the activation delay's worth of audio as pre-roll, so the receiver
+ * hears the sound that opened the gate. Capped by the ring at 200 ms. */
 static void streaming_started(const char* reason) {
+    int64_t now   = now_ms();
     unsigned keep = (unsigned)g_cfg.activation_delay_ms * 8U;
 
-    g_marker = true;
     if (keep < RTP_SAMPLES) {
         keep = RTP_SAMPLES;
     }
     if (keep > RING_CAP) {
         keep = RING_CAP;
     }
+    if (g_cfg.test_mode) {
+        keep            = 0;
+        g_tone_start_ms = now;
+        g_tone_produced = 0;
+    }
     trim_ring(keep);
+    rtp_tx_talkspurt(&g_rtp, now, g_ring_count);
     syslog(LOG_INFO, "RTP started (%s), level %.1f dBFS, dest %s:%d", reason, g_level_db,
            g_cfg.destination_ip, g_cfg.destination_port);
 }
@@ -571,20 +616,20 @@ static int ensure_socket(void) {
     }
     g_rtp_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_rtp_fd < 0) {
-        set_error("Could not open UDP socket");
+        set_error(ERR_NETWORK, "Could not open UDP socket");
         return -1;
     }
     memset(&addr, 0, sizeof addr);
     addr.sin_family = AF_INET;
     addr.sin_port   = htons((uint16_t)g_cfg.destination_port);
     if (inet_pton(AF_INET, g_cfg.destination_ip, &addr.sin_addr) != 1) {
-        set_error("Destination IP is not a unicast IPv4 address");
+        set_error(ERR_NETWORK, "Destination IP is not a unicast IPv4 address");
         close(g_rtp_fd);
         g_rtp_fd = -1;
         return -1;
     }
     if (connect(g_rtp_fd, (struct sockaddr*)&addr, sizeof addr) != 0) {
-        set_error("Could not connect UDP socket");
+        set_error(ERR_NETWORK, "Could not connect UDP socket");
         close(g_rtp_fd);
         g_rtp_fd = -1;
         return -1;
@@ -595,7 +640,7 @@ static int ensure_socket(void) {
 }
 
 static void send_packet(void) {
-    uint8_t packet[12 + RTP_SAMPLES];
+    uint8_t packet[RTP_HEADER_LEN + RTP_SAMPLES];
     unsigned i;
     int fd;
     ssize_t sent;
@@ -607,45 +652,32 @@ static void send_packet(void) {
     if (fd < 0) {
         return;
     }
-    packet[0] = 0x80;
-    packet[1] = (uint8_t)((g_marker ? 0x80 : 0x00) | 8);
-    packet[2] = (uint8_t)(g_seq >> 8);
-    packet[3] = (uint8_t)(g_seq & 0xFF);
-    packet[4] = (uint8_t)(g_timestamp >> 24);
-    packet[5] = (uint8_t)(g_timestamp >> 16);
-    packet[6] = (uint8_t)(g_timestamp >> 8);
-    packet[7] = (uint8_t)(g_timestamp & 0xFF);
-    packet[8]  = (uint8_t)(g_ssrc >> 24);
-    packet[9]  = (uint8_t)(g_ssrc >> 16);
-    packet[10] = (uint8_t)(g_ssrc >> 8);
-    packet[11] = (uint8_t)(g_ssrc & 0xFF);
+    rtp_tx_header(&g_rtp, packet);
     for (i = 0; i < RTP_SAMPLES; i++) {
-        packet[12 + i] = linear_to_alaw(g_ring[g_ring_r]);
-        g_ring_r       = (g_ring_r + 1U) % RING_CAP;
+        packet[RTP_HEADER_LEN + i] = linear_to_alaw(g_ring[g_ring_r]);
+        g_ring_r                   = (g_ring_r + 1U) % RING_CAP;
         g_ring_count--;
     }
-    {
-        unsigned i;
-        for (i = 0; i < 12; i++) {
-            snprintf(g_last_rtp_header + (i * 2), 3, "%02x", packet[i]);
-        }
+    for (i = 0; i < RTP_HEADER_LEN; i++) {
+        snprintf(g_last_rtp_header + (i * 2), 3, "%02x", packet[i]);
     }
     sent = send(fd, packet, sizeof packet, MSG_DONTWAIT);
+    /* The samples are gone either way, so the packet counts for sequence and
+     * timestamp. A failed send is packet loss to the receiver. */
+    rtp_tx_advance(&g_rtp, RTP_SAMPLES);
     if (sent != (ssize_t)sizeof packet) {
+        int err = errno;
         g_send_errors++;
         if (g_send_errors == 1 || (g_send_errors % 100) == 0) {
-            syslog(LOG_WARNING, "RTP send failed: %s", strerror(errno));
-            set_error(strerror(errno));
+            char text[160];
+            syslog(LOG_WARNING, "RTP send failed: %s", strerror(err));
+            snprintf(text, sizeof text, "RTP send failed: %s", strerror(err));
+            set_error(ERR_NETWORK, text);
         }
         return;
     }
-    g_marker = false;
-    g_seq++;
-    g_timestamp += RTP_SAMPLES;
     g_packets_sent++;
-    if (g_last_error[0] != '\0' && strstr(g_last_error, "send") != NULL) {
-        g_last_error[0] = '\0';
-    }
+    clear_error(ERR_NETWORK);
 }
 
 /* 1 kHz sine at about -12 dBFS, already at the 8 kHz RTP rate. */
@@ -664,6 +696,22 @@ static void push_test_tone(unsigned samples) {
     g_level_percent = 25.0;
 }
 
+/* Generates exactly 8,000 tone samples per second of wall-clock time, however
+ * late or bunched the timer ticks are, so a receiver never underruns. */
+static void run_test_tone(int64_t now) {
+    uint64_t due = clock_samples_due(g_tone_start_ms, now, RTP_CLOCK_HZ, g_tone_produced);
+
+    if (due > RING_CAP) {
+        /* A stall longer than the ring: skip ahead rather than send a burst. */
+        g_tone_produced += due - RING_CAP;
+        due = RING_CAP;
+    }
+    push_test_tone((unsigned)due);
+    g_tone_produced += due;
+}
+
+/* Sends up to 4 packets per 10 ms tick: steady state needs half of one, and
+ * the headroom drains the pre-roll at 8x real time. */
 static void drain_audio(void) {
     unsigned sent = 0;
 
@@ -672,11 +720,6 @@ static void drain_audio(void) {
             clear_ring();
         }
         return;
-    }
-    while (g_ring_count > 800U) {
-        g_ring_r = (g_ring_r + 1U) % RING_CAP;
-        g_ring_count--;
-        g_samples_dropped++;
     }
     while (g_ring_count >= RTP_SAMPLES && sent < 4U) {
         send_packet();
@@ -717,7 +760,7 @@ static void publish_status(const char* gate) {
     }
     snprintf(snap.input_node, sizeof snap.input_node, "%s", g_cfg.input_node);
     snprintf(snap.connected_node, sizeof snap.connected_node, "%s", g_impl.connected_name);
-    snprintf(snap.last_error, sizeof snap.last_error, "%s", g_last_error);
+    snprintf(snap.last_error, sizeof snap.last_error, "%s", current_error());
     snprintf(snap.last_rtp_header, sizeof snap.last_rtp_header, "%s", g_last_rtp_header);
     snprintf(snap.config_error, sizeof snap.config_error, "%s", g_cfg_save_error);
     snap.config_rev = g_cfg_rev_applied;
@@ -809,11 +852,10 @@ static void take_control_updates(void) {
         g_cfg_rev_applied = u.rev;
         snprintf(g_cfg_save_error, sizeof g_cfg_save_error, "%s", u.save_error);
         if (u.cfg_error[0] != '\0') {
-            set_error(u.cfg_error);
-        } else if (g_shown_cfg_error[0] != '\0' && strcmp(g_last_error, g_shown_cfg_error) == 0) {
-            g_last_error[0] = '\0';
+            set_error(ERR_CONFIG, u.cfg_error);
+        } else {
+            clear_error(ERR_CONFIG);
         }
-        snprintf(g_shown_cfg_error, sizeof g_shown_cfg_error, "%s", u.cfg_error);
     }
 }
 
@@ -825,7 +867,7 @@ static void destroy_stream(struct impl* impl);
 static void check_capture(struct impl* impl, int64_t now) {
     if (impl->stream != NULL && !g_stream_failed && now - g_last_process_ms > AUDIO_WATCHDOG_MS) {
         syslog(LOG_WARNING, "No audio from %s for %d ms, reconnecting", impl->connected_name, AUDIO_WATCHDOG_MS);
-        set_error("No audio from the input, reconnecting");
+        set_error(ERR_CAPTURE, "No audio from the input, reconnecting");
         g_stream_failed = true;
     }
     if (g_stream_failed) {
@@ -854,7 +896,7 @@ static void on_timeout(void* data, uint64_t expirations) {
     ensure_stream(impl, now);
     update_gate();
     if (g_cfg.test_mode && g_gate.streaming) {
-        push_test_tone(80);
+        run_test_tone(now);
     }
     drain_audio();
     gate = gate_state(&g_gate, g_cfg.test_mode);
@@ -877,23 +919,21 @@ static void on_param_changed(void* data, uint32_t id, const struct spa_pod* para
     }
     res = spa_format_parse(param, &impl->info.media_type, &impl->info.media_subtype);
     if (res < 0) {
-        set_error("Could not parse capture format");
+        set_error(ERR_CAPTURE, "Could not parse capture format");
         return;
     }
     if (impl->info.media_type != SPA_MEDIA_TYPE_audio || impl->info.media_subtype != SPA_MEDIA_SUBTYPE_raw) {
-        set_error("Capture format is not raw audio");
+        set_error(ERR_CAPTURE, "Capture format is not raw audio");
         return;
     }
     spa_format_audio_raw_parse(param, &impl->info.info.raw);
     impl->format_ready = true;
-    if (impl->info.info.raw.rate >= 8000 && (impl->info.info.raw.rate % 8000) == 0) {
-        g_decim = (int)(impl->info.info.raw.rate / 8000);
-    } else {
-        g_decim = 0;
-        set_error("Capture rate is not a multiple of 8000 Hz");
+    if (!decimator_init(&g_decim, impl->info.info.raw.rate)) {
+        set_error(ERR_CAPTURE, "Capture rate is not a multiple of 8000 Hz");
     }
-    syslog(LOG_INFO, "Capturing %s, %u ch, %u Hz, format %d, decimation %d", impl->connected_name,
-           impl->info.info.raw.channels, impl->info.info.raw.rate, impl->info.info.raw.format, g_decim);
+    syslog(LOG_INFO, "Capturing %s, %u ch, %u Hz, format %d, decimation %d (%d-tap filter)", impl->connected_name,
+           impl->info.info.raw.channels, impl->info.info.raw.rate, impl->info.info.raw.format, g_decim.factor,
+           g_decim.taps);
 }
 
 static void on_state_changed(void* data, enum pw_stream_state old, enum pw_stream_state state, const char* error) {
@@ -902,55 +942,50 @@ static void on_state_changed(void* data, enum pw_stream_state old, enum pw_strea
     syslog(LOG_INFO, "PipeWire %s -> %s", pw_stream_state_as_string(old), pw_stream_state_as_string(state));
     if (state == PW_STREAM_STATE_ERROR) {
         syslog(LOG_ERR, "PipeWire stream error: %s", error != NULL ? error : "");
-        set_error("PipeWire stream error, reconnecting");
+        set_error(ERR_CAPTURE, "PipeWire stream error, reconnecting");
         impl->format_ready = false;
         /* Destroying a stream inside its own callback is not safe. */
         g_stream_failed = true;
-    } else if (state == PW_STREAM_STATE_STREAMING) {
-        if (strncmp(g_last_error, "PipeWire", 8) == 0 || strncmp(g_last_error, "Input node", 10) == 0 ||
-            strncmp(g_last_error, "No audio", 8) == 0) {
-            g_last_error[0] = '\0';
-        }
     }
+    /* Capture errors clear in on_process, once audio actually arrives. */
 }
 
-static void consume_samples(const float* left, const float* right, uint32_t count) {
+/* Mixes to mono, measures peak and RMS, and feeds the 8 kHz decimator. Planar
+ * audio uses stride 1 with a separate right pointer; interleaved audio uses
+ * stride = channels with right = left + 1. */
+static void consume_frames(const float* left, const float* right, uint32_t frames, uint32_t stride) {
     double sumsq = 0.0;
-    float peak = 0.f;
+    float peak   = 0.f;
     uint32_t i;
 
-    if (count == 0 || left == NULL) {
+    if (frames == 0 || left == NULL) {
         return;
     }
-    for (i = 0; i < count; i++) {
-        float sample = left[i];
-        float amp = fabsf(left[i]);
+    for (i = 0; i < frames; i++) {
+        float sample = left[i * stride];
+        float amp    = fabsf(sample);
+        float out;
+
         if (right != NULL) {
-            amp = fmaxf(amp, fabsf(right[i]));
-            sample = 0.5f * (sample + right[i]);
+            float r = right[i * stride];
+            amp     = fmaxf(amp, fabsf(r));
+            sample  = 0.5f * (sample + r);
         }
         if (amp > peak) {
             peak = amp;
         }
         sumsq += (double)sample * (double)sample;
-        if (g_decim > 0) {
-            g_acc += sample;
-            g_acc_n++;
-            if (g_acc_n >= g_decim) {
-                float mixed = g_acc / (float)g_decim;
-                if (mixed > 1.f) {
-                    mixed = 1.f;
-                } else if (mixed < -1.f) {
-                    mixed = -1.f;
-                }
-                push_pcm((int16_t)lrintf(mixed * 32767.f));
-                g_acc   = 0.f;
-                g_acc_n = 0;
+        if (decimator_push(&g_decim, sample, &out)) {
+            if (out > 1.f) {
+                out = 1.f;
+            } else if (out < -1.f) {
+                out = -1.f;
             }
+            push_pcm((int16_t)lrintf(out * 32767.f));
         }
     }
     {
-        double rms = sqrt(sumsq / (double)count);
+        double rms = sqrt(sumsq / (double)frames);
         g_level_db = rms < 1e-9 ? -120.0 : 20.0 * log10(rms);
         if (peak > 1.f) {
             peak = 1.f;
@@ -985,6 +1020,7 @@ static void on_process(void* data) {
     struct spa_buffer* buf;
     uint32_t count = 0;
     const float* left;
+    bool consumed = false;
 
     buffer = pw_stream_dequeue_buffer(impl->stream);
     if (buffer == NULL) {
@@ -1014,54 +1050,19 @@ static void on_process(void* data) {
                 count = right_count;
             }
         }
-        consume_samples(left, right, count);
+        consume_frames(left, right, count, 1);
+        consumed = true;
     } else if (impl->info.info.raw.format == SPA_AUDIO_FORMAT_F32) {
         uint32_t channels = impl->info.info.raw.channels > 0 ? impl->info.info.raw.channels : 1;
-        uint32_t frames   = count / channels;
-        const float* interleaved = left;
-        uint32_t i;
-        double sumsq = 0.0;
-        float peak = 0.f;
-
-        for (i = 0; i < frames; i++) {
-            float sample = interleaved[i * channels];
-            float amp = fabsf(sample);
-            if (channels > 1) {
-                amp = fmaxf(amp, fabsf(interleaved[i * channels + 1]));
-                sample = 0.5f * (sample + interleaved[i * channels + 1]);
-            }
-            if (amp > peak) {
-                peak = amp;
-            }
-            sumsq += (double)sample * (double)sample;
-            if (g_decim > 0) {
-                g_acc += sample;
-                g_acc_n++;
-                if (g_acc_n >= g_decim) {
-                    float mixed = g_acc / (float)g_decim;
-                    if (mixed > 1.f) {
-                        mixed = 1.f;
-                    } else if (mixed < -1.f) {
-                        mixed = -1.f;
-                    }
-                    push_pcm((int16_t)lrintf(mixed * 32767.f));
-                    g_acc   = 0.f;
-                    g_acc_n = 0;
-                }
-            }
-        }
-        if (frames > 0) {
-            double rms = sqrt(sumsq / (double)frames);
-            g_level_db = rms < 1e-9 ? -120.0 : 20.0 * log10(rms);
-            if (peak > 1.f) {
-                peak = 1.f;
-            }
-            g_level_percent = (double)peak * 100.0;
-        }
+        consume_frames(left, channels > 1 ? left + 1 : NULL, count / channels, channels);
+        consumed = true;
     } else if (!g_logged_bad_format) {
         g_logged_bad_format = true;
         syslog(LOG_ERR, "Unsupported PipeWire format %d", impl->info.info.raw.format);
-        set_error("Unsupported capture format");
+        set_error(ERR_CAPTURE, "Unsupported capture format");
+    }
+    if (consumed && g_decim.factor > 0 && g_errors[ERR_CAPTURE][0] != '\0') {
+        clear_error(ERR_CAPTURE); /* audio is flowing and usable again */
     }
     pw_stream_queue_buffer(impl->stream, buffer);
 }
@@ -1083,7 +1084,7 @@ static void destroy_stream(struct impl* impl) {
     impl->format_ready   = false;
     impl->connected_id   = 0;
     impl->connected_name[0] = '\0';
-    g_decim              = 0;
+    memset(&g_decim, 0, sizeof g_decim);
     stop_streaming("capture stopped");
     clear_ring();
 }
@@ -1102,12 +1103,12 @@ static void connect_node(struct impl* impl, uint32_t id, const char* name) {
     props = pw_properties_new(PW_KEY_MEDIA_TYPE, "Audio", PW_KEY_MEDIA_CATEGORY, "Capture", PW_KEY_TARGET_OBJECT,
                               name, NULL);
     if (props == NULL) {
-        set_error("Could not create PipeWire properties");
+        set_error(ERR_CAPTURE, "Could not create PipeWire properties");
         return;
     }
     impl->stream = pw_stream_new(impl->core, "lineinrtp", props);
     if (impl->stream == NULL) {
-        set_error("Could not create PipeWire stream");
+        set_error(ERR_CAPTURE, "Could not create PipeWire stream");
         return;
     }
     pw_stream_add_listener(impl->stream, &impl->stream_listener, &stream_events, impl);
@@ -1117,7 +1118,7 @@ static void connect_node(struct impl* impl, uint32_t id, const char* name) {
                             PW_STREAM_FLAG_AUTOCONNECT | PW_STREAM_FLAG_MAP_BUFFERS, params, 1);
     if (res < 0) {
         syslog(LOG_ERR, "PipeWire connect failed for %s: %s", name, strerror(-res));
-        set_error("PipeWire connect failed");
+        set_error(ERR_CAPTURE, "PipeWire connect failed");
         destroy_stream(impl);
         return;
     }
@@ -1207,7 +1208,7 @@ static void registry_event_global_remove(void* data, uint32_t id) {
     if (impl->connected_id == id) {
         syslog(LOG_WARNING, "Input node %s disappeared", impl->connected_name);
         destroy_stream(impl);
-        set_error("Input node disappeared");
+        set_error(ERR_CAPTURE, "Input node disappeared");
     }
 }
 
@@ -1559,8 +1560,10 @@ static void handle_client(int fd) {
     char* body;
     struct timeval tv;
 
-    tv.tv_sec  = 2;
-    tv.tv_usec = 0;
+    /* The AXIS reverse proxy on loopback sends a whole request at once. A short
+     * timeout keeps one stalled client from blocking the page's status polls. */
+    tv.tv_sec  = 0;
+    tv.tv_usec = 500000;
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
 
@@ -1829,9 +1832,13 @@ int main(int argc, char* argv[]) {
     openlog(APP_NAME, LOG_PID, LOG_USER);
     memset(impl, 0, sizeof *impl);
     impl->http_listen_fd = -1;
-    g_seq                = (uint16_t)(now_ms() & 0xFFFF);
-    g_timestamp          = (uint32_t)now_ms();
-    g_ssrc               = (uint32_t)(now_ms() ^ 0x4C494E45);
+    {
+        uint8_t rnd[10];
+        random_bytes(rnd, sizeof rnd);
+        rtp_tx_init(&g_rtp, (uint16_t)((rnd[0] << 8) | rnd[1]),
+                    ((uint32_t)rnd[2] << 24) | ((uint32_t)rnd[3] << 16) | ((uint32_t)rnd[4] << 8) | rnd[5],
+                    ((uint32_t)rnd[6] << 24) | ((uint32_t)rnd[7] << 16) | ((uint32_t)rnd[8] << 8) | rnd[9]);
+    }
 
     impl->params = ax_parameter_new(APP_NAME, &error);
     if (impl->params == NULL) {
@@ -1840,7 +1847,7 @@ int main(int argc, char* argv[]) {
     }
     read_cfg(impl->params, &g_cfg, cfg_err, sizeof cfg_err);
     if (cfg_err[0] != '\0') {
-        set_error(cfg_err);
+        set_error(ERR_CONFIG, cfg_err);
     }
     publish_status("inactive");
 

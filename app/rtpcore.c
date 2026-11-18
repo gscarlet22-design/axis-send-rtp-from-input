@@ -45,8 +45,11 @@ uint8_t linear_to_alaw(int16_t pcm) {
     return (uint8_t)(aval ^ mask);
 }
 
-/* Rejects leading zeros, 0.0.0.0/8, multicast 224.0.0.0/4, and the reserved
- * 240.0.0.0/4 block. */
+/* Rejects leading zeros, 0.0.0.0/8, loopback 127.0.0.0/8 (it would send to
+ * the camera itself), multicast 224.0.0.0/4, and the reserved 240.0.0.0/4
+ * block, which includes 255.255.255.255. A subnet-directed broadcast such as
+ * x.x.x.255 can't be told apart from a host without the netmask, so it is
+ * allowed. */
 bool valid_ipv4(const char* text) {
     unsigned a;
     unsigned b;
@@ -61,7 +64,7 @@ bool valid_ipv4(const char* text) {
     if (sscanf(text, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4) {
         return false;
     }
-    if (a > 255 || b > 255 || c > 255 || d > 255 || a == 0 || a >= 224) {
+    if (a > 255 || b > 255 || c > 255 || d > 255 || a == 0 || a == 127 || a >= 224) {
         return false;
     }
     snprintf(canonical, sizeof canonical, "%u.%u.%u.%u", a, b, c, d);
@@ -123,6 +126,13 @@ static struct gate_result stop(struct gate* g, const char* reason) {
     return gate_stop(g) ? result(GATE_STOP, reason) : result(GATE_NONE, NULL);
 }
 
+/* Stop for a reason that also abandons a pending activation, so the page
+ * doesn't show "pending" while disabled and re-enabling waits the full delay. */
+static struct gate_result stop_and_forget(struct gate* g, const char* reason) {
+    g->hot_since = 0;
+    return stop(g, reason);
+}
+
 static struct gate_result start(struct gate* g, int64_t now, const char* reason) {
     if (g->streaming) {
         return result(GATE_NONE, NULL);
@@ -137,14 +147,14 @@ struct gate_result gate_step(struct gate* g, const struct gate_input* in, int64_
 
     if (!in->enabled || !in->have_destination) {
         g->waiting_for_clear = false;
-        return stop(g, in->enabled ? "no destination" : "disabled");
+        return stop_and_forget(g, in->enabled ? "no destination" : "disabled");
     }
     if (in->test_mode) {
         g->waiting_for_clear = false;
         return start(g, now, "test tone");
     }
     if (!in->format_ready) {
-        return stop(g, "no capture");
+        return stop_and_forget(g, "no capture");
     }
     if (in->force_on) {
         g->waiting_for_clear = false;
@@ -152,7 +162,7 @@ struct gate_result gate_step(struct gate* g, const struct gate_input* in, int64_
     }
     if (in->trigger_port > 0) {
         if (in->port_active < 0) {
-            return stop(g, "input state unknown");
+            return stop_and_forget(g, "input state unknown");
         }
         hot  = in->port_active == 1;
         idle = !hot;
@@ -222,4 +232,129 @@ const char* gate_state(const struct gate* g, bool test_mode) {
         return "pending";
     }
     return "inactive";
+}
+
+/* ---------------------------------------------------------------- RTP sender */
+
+void rtp_tx_init(struct rtp_tx* tx, uint16_t seq, uint32_t timestamp, uint32_t ssrc) {
+    memset(tx, 0, sizeof *tx);
+    tx->seq       = seq;
+    tx->timestamp = timestamp;
+    tx->ssrc      = ssrc;
+    tx->marker    = true;
+}
+
+void rtp_tx_talkspurt(struct rtp_tx* tx, int64_t now_ms, unsigned buffered) {
+    tx->marker = true;
+    if (tx->have_stop && now_ms > tx->stop_ms) {
+        /* The pre-roll was sampled before now, so its first sample sits
+         * `buffered` samples before the gap's end. */
+        int64_t gap = (now_ms - tx->stop_ms) * RTP_CLOCK_HZ / 1000 - (int64_t)buffered;
+        if (gap > 0) {
+            tx->timestamp += (uint32_t)gap; /* wraps modulo 2^32, as RTP expects */
+        }
+    }
+    tx->have_stop = false;
+}
+
+void rtp_tx_stop(struct rtp_tx* tx, int64_t now_ms) {
+    tx->have_stop = true;
+    tx->stop_ms   = now_ms;
+    tx->marker    = true;
+}
+
+void rtp_tx_header(const struct rtp_tx* tx, uint8_t out[RTP_HEADER_LEN]) {
+    out[0]  = 0x80; /* version 2, no padding, extension or CSRCs */
+    out[1]  = (uint8_t)((tx->marker ? 0x80 : 0x00) | RTP_PT_PCMA);
+    out[2]  = (uint8_t)(tx->seq >> 8);
+    out[3]  = (uint8_t)(tx->seq & 0xFF);
+    out[4]  = (uint8_t)(tx->timestamp >> 24);
+    out[5]  = (uint8_t)(tx->timestamp >> 16);
+    out[6]  = (uint8_t)(tx->timestamp >> 8);
+    out[7]  = (uint8_t)(tx->timestamp & 0xFF);
+    out[8]  = (uint8_t)(tx->ssrc >> 24);
+    out[9]  = (uint8_t)(tx->ssrc >> 16);
+    out[10] = (uint8_t)(tx->ssrc >> 8);
+    out[11] = (uint8_t)(tx->ssrc & 0xFF);
+}
+
+void rtp_tx_advance(struct rtp_tx* tx, unsigned samples) {
+    tx->seq++;
+    tx->timestamp += samples;
+    tx->marker = false;
+}
+
+uint64_t clock_samples_due(int64_t start_ms, int64_t now_ms, unsigned rate, uint64_t produced) {
+    uint64_t total;
+
+    if (now_ms <= start_ms) {
+        return 0;
+    }
+    total = (uint64_t)(now_ms - start_ms) * rate / 1000U;
+    return total > produced ? total - produced : 0;
+}
+
+/* ---------------------------------------------------------------- decimator */
+
+bool decimator_init(struct decimator* d, unsigned in_rate) {
+    const double pi = 3.14159265358979323846;
+    double fc;
+    double sum = 0.0;
+    int middle;
+    int n;
+
+    memset(d, 0, sizeof *d);
+    if (in_rate < RTP_CLOCK_HZ || in_rate % RTP_CLOCK_HZ != 0 || in_rate / RTP_CLOCK_HZ > DECIM_MAX_FACTOR) {
+        return false;
+    }
+    d->factor = (int)(in_rate / RTP_CLOCK_HZ);
+    if (d->factor == 1) {
+        d->taps    = 1;
+        d->coef[0] = 1.f;
+        return true;
+    }
+    d->taps = d->factor * DECIM_TAPS_PER_FACTOR + 1;
+    middle  = (d->taps - 1) / 2;
+    fc      = (RTP_CLOCK_HZ / 2.0) / (double)in_rate; /* cycles per input sample */
+    for (n = 0; n < d->taps; n++) {
+        int x       = n - middle;
+        double sinc = x == 0 ? 2.0 * fc : sin(2.0 * pi * fc * x) / (pi * x);
+        double t    = (double)n / (double)(d->taps - 1);
+        double w    = 0.42 - 0.5 * cos(2.0 * pi * t) + 0.08 * cos(4.0 * pi * t);
+        d->coef[n]  = (float)(sinc * w);
+        sum += sinc * w;
+    }
+    for (n = 0; n < d->taps; n++) {
+        d->coef[n] = (float)(d->coef[n] / sum); /* unity gain at DC */
+    }
+    return true;
+}
+
+void decimator_reset(struct decimator* d) {
+    memset(d->hist, 0, sizeof d->hist);
+    d->pos   = 0;
+    d->phase = 0;
+}
+
+bool decimator_push(struct decimator* d, float in, float* out) {
+    float acc = 0.f;
+    int idx;
+    int k;
+
+    if (d->factor <= 0) {
+        return false;
+    }
+    d->hist[d->pos] = in;
+    d->pos          = d->pos + 1 == d->taps ? 0 : d->pos + 1;
+    if (++d->phase < d->factor) {
+        return false;
+    }
+    d->phase = 0;
+    idx      = d->pos; /* oldest sample; the filter is symmetric */
+    for (k = 0; k < d->taps; k++) {
+        acc += d->coef[k] * d->hist[idx];
+        idx = idx + 1 == d->taps ? 0 : idx + 1;
+    }
+    *out = acc;
+    return true;
 }
