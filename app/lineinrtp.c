@@ -45,8 +45,12 @@
 #define RING_CAP 1600U
 #define RTP_SAMPLES 160U
 #define DEFAULT_NODE "AudioDevice0Input0.Unprocessed"
-#define HIST_LEN 256U /* 25.6 s: the page's 24 s chart is full on first load. A power of two keeps seq % HIST_LEN continuous across wrap. */
-#define HIST_INTERVAL_MS 100
+/* 20 ms entries, about one PipeWire buffer each, so the page's preview
+ * replays nearly what the gate saw. 2048 entries is 41 s: the 24 s chart is
+ * full on first load with warm-up for the preview. A power of two keeps
+ * seq % HIST_LEN continuous across wrap. */
+#define HIST_LEN 2048U
+#define HIST_INTERVAL_MS 20
 #define CFG_RELOAD_MS 1000
 #define AUDIO_WATCHDOG_MS 5000
 #define RETRY_MIN_MS 1000
@@ -84,6 +88,9 @@ struct ctl_update {
     char save_error[160];
 };
 
+/* One error slot per subsystem; see set_error(). */
+enum err_slot { ERR_CONFIG, ERR_CAPTURE, ERR_NETWORK, ERR_SLOTS };
+
 struct status_snap {
     double level_db;
     char gate[16];
@@ -109,6 +116,7 @@ struct status_snap {
     char input_node[NAME_MAX_LEN + 1];
     char connected_node[NAME_MAX_LEN + 1];
     char last_error[160];
+    char errors[ERR_SLOTS][160];
     char last_rtp_header[25];
     char config_error[160];
     unsigned config_rev;
@@ -116,12 +124,6 @@ struct status_snap {
     uint64_t send_errors;
     uint64_t samples_dropped;
     unsigned buffered_samples;
-    uint32_t hist_seq;
-    unsigned hist_count;
-    float hist_level[HIST_LEN];
-    uint8_t hist_gate[HIST_LEN];
-    int8_t hist_port1[HIST_LEN];
-    int8_t hist_port2[HIST_LEN];
 };
 
 struct node_ref {
@@ -171,6 +173,9 @@ static int g_retry_ms = RETRY_MIN_MS;
 static int64_t g_last_process_ms;
 static int64_t g_connected_ms;
 static int g_exit_code = EXIT_SUCCESS;
+/* History ring: written by the main loop, read by the HTTP thread, guarded
+ * by g_mu. It lives outside g_status so the 10 ms status publish doesn't copy
+ * 41 s of history every tick. */
 static float g_hist_level[HIST_LEN];
 static uint8_t g_hist_gate[HIST_LEN];
 static int8_t g_hist_port1[HIST_LEN];
@@ -223,8 +228,8 @@ static int64_t now_ms(void) {
 }
 
 /* One error slot per subsystem, each cleared when that subsystem recovers.
- * /api/status reports the first one set, in this order. Main loop only. */
-enum err_slot { ERR_CONFIG, ERR_CAPTURE, ERR_NETWORK, ERR_SLOTS };
+ * /api/status reports all of them, and the first one set as lastError.
+ * Main loop only. */
 static char g_errors[ERR_SLOTS][160];
 
 static void set_error(enum err_slot slot, const char* text) {
@@ -764,22 +769,10 @@ static void publish_status(const char* gate) {
     snprintf(snap.input_node, sizeof snap.input_node, "%s", g_cfg.input_node);
     snprintf(snap.connected_node, sizeof snap.connected_node, "%s", g_impl.connected_name);
     snprintf(snap.last_error, sizeof snap.last_error, "%.159s", current_error());
+    memcpy(snap.errors, g_errors, sizeof snap.errors);
     snprintf(snap.last_rtp_header, sizeof snap.last_rtp_header, "%s", g_last_rtp_header);
     snprintf(snap.config_error, sizeof snap.config_error, "%s", g_cfg_save_error);
     snap.config_rev = g_cfg_rev_applied;
-    snap.hist_seq   = g_hist_seq;
-    snap.hist_count = g_hist_seq < HIST_LEN ? g_hist_seq : HIST_LEN;
-    {
-        unsigned i;
-        uint32_t first = g_hist_seq - snap.hist_count;
-        for (i = 0; i < snap.hist_count; i++) {
-            unsigned idx           = (unsigned)((first + i) % HIST_LEN);
-            snap.hist_level[i]     = g_hist_level[idx];
-            snap.hist_gate[i]      = g_hist_gate[idx];
-            snap.hist_port1[i]     = g_hist_port1[idx];
-            snap.hist_port2[i]     = g_hist_port2[idx];
-        }
-    }
 
     pthread_mutex_lock(&g_mu);
     g_status = snap;
@@ -807,8 +800,8 @@ static uint8_t gate_code(const char* gate) {
     return 0;
 }
 
-/* One entry per 100 ms: the peak level seen in that window and the gate state
- * at its end. The page merges entries by sequence number, so its chart shows
+/* One entry per HIST_INTERVAL_MS: the peak level seen in that window and the
+ * gate state at its end. The page merges entries by sequence number, so its chart shows
  * real gate history at a steady rate whatever its polling interval. */
 static void record_history(int64_t now, const char* gate) {
     unsigned idx;
@@ -824,12 +817,14 @@ static void record_history(int64_t now, const char* gate) {
         return;
     }
     peak = g_hist_peak < 0.0 ? 0.0 : g_hist_peak > 100.0 ? 100.0 : g_hist_peak;
+    pthread_mutex_lock(&g_mu);
     idx  = (unsigned)(g_hist_seq % HIST_LEN);
     g_hist_level[idx] = (float)peak; /* fractional: quiet input stays visible on a dB scale */
     g_hist_gate[idx]  = gate_code(gate);
     g_hist_port1[idx] = (int8_t)port_is_active(1);
     g_hist_port2[idx] = (int8_t)port_is_active(2);
     g_hist_seq++;
+    pthread_mutex_unlock(&g_mu);
     g_hist_peak = 0.0;
     g_hist_next_ms += HIST_INTERVAL_MS;
     if (now >= g_hist_next_ms) {
@@ -1252,8 +1247,17 @@ static const struct pw_core_events core_events = {
  * of the whole buffer. A proxy that drops the query string just gets the
  * full buffer, which the page merges the same way. */
 static char* status_json(long long since) {
+    /* Static: the HTTP server handles one request at a time. */
+    static float level[HIST_LEN];
+    static uint8_t gates[HIST_LEN];
+    static int8_t port1[HIST_LEN];
+    static int8_t port2[HIST_LEN];
+    static const char* const err_area[ERR_SLOTS] = {"config", "capture", "network"};
     struct status_snap snap;
+    uint32_t hist_seq;
+    unsigned hist_count;
     unsigned skip = 0;
+    json_t* errors;
     json_t* root;
     json_t* hist;
     json_t* hist_level;
@@ -1264,7 +1268,21 @@ static char* status_json(long long since) {
     char* text;
 
     pthread_mutex_lock(&g_mu);
-    snap = g_status;
+    snap       = g_status;
+    hist_seq   = g_hist_seq;
+    hist_count = hist_seq < HIST_LEN ? hist_seq : HIST_LEN;
+    if (since >= 0) {
+        long long first = (long long)hist_seq - (long long)hist_count;
+        long long want  = since + 1 - first;
+        skip            = want <= 0 ? 0 : want >= (long long)hist_count ? hist_count : (unsigned)want;
+    }
+    for (i = skip; i < hist_count; i++) {
+        unsigned idx = (unsigned)((hist_seq - hist_count + i) % HIST_LEN);
+        level[i]     = g_hist_level[idx];
+        gates[i]     = g_hist_gate[idx];
+        port1[i]     = g_hist_port1[idx];
+        port2[i]     = g_hist_port2[idx];
+    }
     pthread_mutex_unlock(&g_mu);
 
     root = json_object();
@@ -1275,18 +1293,13 @@ static char* status_json(long long since) {
     hist_gate  = json_array();
     hist_port1 = json_array();
     hist_port2 = json_array();
-    if (since >= 0) {
-        long long first = (long long)snap.hist_seq - (long long)snap.hist_count;
-        long long want  = since + 1 - first;
-        skip            = want <= 0 ? 0 : want >= (long long)snap.hist_count ? snap.hist_count : (unsigned)want;
+    for (i = skip; i < hist_count; i++) {
+        json_array_append_new(hist_level, json_real((double)level[i]));
+        json_array_append_new(hist_gate, json_integer(gates[i]));
+        json_array_append_new(hist_port1, json_integer(port1[i]));
+        json_array_append_new(hist_port2, json_integer(port2[i]));
     }
-    for (i = skip; i < snap.hist_count; i++) {
-        json_array_append_new(hist_level, json_real((double)snap.hist_level[i]));
-        json_array_append_new(hist_gate, json_integer(snap.hist_gate[i]));
-        json_array_append_new(hist_port1, json_integer(snap.hist_port1[i]));
-        json_array_append_new(hist_port2, json_integer(snap.hist_port2[i]));
-    }
-    json_object_set_new(hist, "seq", json_integer((json_int_t)snap.hist_seq));
+    json_object_set_new(hist, "seq", json_integer((json_int_t)hist_seq));
     json_object_set_new(hist, "intervalMs", json_integer(HIST_INTERVAL_MS));
     json_object_set_new(hist, "level", hist_level);
     json_object_set_new(hist, "gate", hist_gate);
@@ -1325,6 +1338,16 @@ static char* status_json(long long since) {
     json_object_set_new(root, "samplesDropped", json_integer((json_int_t)snap.samples_dropped));
     json_object_set_new(root, "bufferedSamples", json_integer(snap.buffered_samples));
     json_object_set_new(root, "lastError", json_string(snap.last_error));
+    errors = json_array();
+    for (i = 0; i < ERR_SLOTS; i++) {
+        if (snap.errors[i][0] != '\0') {
+            json_t* e = json_object();
+            json_object_set_new(e, "area", json_string(err_area[i]));
+            json_object_set_new(e, "message", json_string(snap.errors[i]));
+            json_array_append_new(errors, e);
+        }
+    }
+    json_object_set_new(root, "errors", errors);
     json_object_set_new(root, "lastRtpHeader", json_string(snap.last_rtp_header));
     /* Four significant digits keep quiet levels exact enough on a dB scale
      * (0.003162 is -90.0 dBFS) without jansson's default 17. */

@@ -15,7 +15,7 @@ CFLAGS  += -fsanitize=address,undefined -fno-omit-frame-pointer -fno-sanitize-re
 LDFLAGS += -fsanitize=address,undefined
 endif
 
-.PHONY: test clean
+.PHONY: test preview clean
 
 test: test_rtpcore
 	./test_rtpcore
@@ -23,5 +23,13 @@ test: test_rtpcore
 test_rtpcore: test_rtpcore.c $(APP_DIR)/rtpcore.c $(APP_DIR)/rtpcore.h
 	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ test_rtpcore.c $(APP_DIR)/rtpcore.c $(LDLIBS)
 
+# The page's preview must replay the app's gate exactly. Needs Node.js.
+preview: gate_dump
+	./gate_dump > gate_vectors.json
+	node test_preview.js gate_vectors.json
+
+gate_dump: gate_dump.c $(APP_DIR)/rtpcore.c $(APP_DIR)/rtpcore.h
+	$(CC) $(CFLAGS) $(LDFLAGS) -o $@ gate_dump.c $(APP_DIR)/rtpcore.c $(LDLIBS)
+
 clean:
-	rm -f test_rtpcore
+	rm -f test_rtpcore gate_dump gate_vectors.json

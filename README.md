@@ -29,6 +29,12 @@ The page at `/local/lineinrtp/` has three parts:
 
 In a window 900 px or wider, the chart stays in view on the left while the settings scroll on the right, so you can watch the preview as you move a slider. The header with Save stays at the top at any width.
 
+The preview replays the app's own gate logic: the app records the input every 20 ms (about one PipeWire buffer), and the page runs each entry as two 10 ms ticks, the app's timer. CI checks that the page's replay matches the app's gate state for state (`make -C tests preview`).
+
+The Activation delay, Release hold and Maximum on time sliders take fine steps at the low end and coarse ones higher up, so each reaches its full range (10 s, 60 s and 1 hour). The box beside each slider takes any whole value.
+
+The page follows the system's light or dark theme. The button at the right of the header switches between system, dark and light, and the choice is kept in that browser.
+
 You can drag the Opens and Closes lines on the chart directly. Dragging one line leaves the other in place unless it has to move to keep the margin between 0 and 40 dB. Hold Shift to move both lines together, and press Esc to cancel a drag. Each line can also take keyboard focus: the arrow keys move it 1 dB, Page Up and Page Down move it 6 dB.
 
 The activation level slider runs from −90 to 0 dBFS. The release margin slider runs from 0 to 40 dB, but its top end shrinks as the activation level nears −90, so the closing level stays at or above the floor. Lowering the activation level pulls the margin down with it when needed. "Saved" only appears after the app has written the values and read them back.
@@ -63,6 +69,7 @@ The pure logic (A-law encoder, address and node-name validation, and the gate st
 ```bash
 make -C tests            # build and run
 make -C tests SAN=1      # with AddressSanitizer and UBSan
+make -C tests preview    # the page's preview against the app's gate (needs Node.js)
 python3 -m unittest discover -s tests
 ```
 
@@ -122,7 +129,8 @@ Set the jack to line input on the device Audio page before trusting the threshol
 
 `GET /local/lineinrtp/api/status` returns level, gate, packet counts, and the last error. It also returns:
 
-- `history`: up to 25.6 s of 100 ms entries of peak level (0–100 linear, fractional), gate code, and port states. Gate codes: 0 idle, 1 opening, 2 sending, 3 holding, 4 max-on re-arming, 5 test tone. `history.seq` is one past the newest entry's sequence number. Pass `?since=<sequence number>` to get only newer entries; the settings page does this on every poll.
+- `errors`: every current error as `{area, message}`, where area is `config`, `capture` or `network`. `lastError` is the first of them.
+- `history`: up to 41 s of 20 ms entries (`intervalMs`) of peak level (0–100 linear, fractional), gate code, and port states. Gate codes: 0 idle, 1 opening, 2 sending, 3 holding, 4 max-on re-arming, 5 test tone. `history.seq` is one past the newest entry's sequence number. Pass `?since=<sequence number>` to get only newer entries; the settings page does this on every poll.
 - `configRev` and `configError`.
 
 `POST /local/lineinrtp/api/config` saves the fields above. The reply carries a `rev`, and the save is complete once `/api/status` reports `configRev` at or above that value. Status is viewer. Configuration is admin.

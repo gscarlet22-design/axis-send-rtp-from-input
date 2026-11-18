@@ -38,11 +38,13 @@ const knobs = {
   saveMs: opt("save-ms", 300),
   fail: opt("fail", 0),
   hang: opt("hang", 0),
-  down: false
+  down: false,
+  errors: []   /* e.g. [{"area":"capture","message":"No audio from the input, reconnecting"}] */
 };
 const PAGE = path.join(__dirname, "..", "app", "html", "index.html");
 const FLOOR_DB = -90;
-const HIST_LEN = 256;
+const HIST_LEN = 2048;   /* 41 s of 20 ms entries, as in the app */
+const IV = 20;
 
 const cfg = {
   enabled: true, forceOn: false, testMode: false, trigger: "level",
@@ -115,22 +117,26 @@ function gateName() {
 }
 const GATE_CODE = { inactive: 0, pending: 1, active: 2, holding: 3, waiting: 4, test: 5 };
 
-/* 10 ms ticks like the app; one history entry per 100 ms holding the window's peak. */
+/* 10 ms ticks like the app, run in batches every 100 ms; one history entry
+   per 20 ms holding that window's peak. */
 let peak = 0;
+let tick = 0;
 setInterval(() => {
   const t = Date.now() - start;
+  const push = (arr, v) => { arr.push(v); if (arr.length > HIST_LEN) arr.shift(); };
   for (let i = 0; i < 10; i++) {
     step(t + i * 10);
     peak = Math.max(peak, levelPercent);
     if (gate.streaming && i % 2 === 0) packetsSent++;
+    if (++tick % (IV / 10) === 0) {
+      push(hist.level, Number(peak.toPrecision(4)));
+      push(hist.gate, GATE_CODE[gateName()]);
+      push(hist.port1, port1);
+      push(hist.port2, 1 - port1);
+      hist.seq++;
+      peak = 0;
+    }
   }
-  const push = (arr, v) => { arr.push(v); if (arr.length > HIST_LEN) arr.shift(); };
-  push(hist.level, Math.round(peak * 1000) / 1000);
-  push(hist.gate, GATE_CODE[gateName()]);
-  push(hist.port1, port1);
-  push(hist.port2, 1 - port1);
-  hist.seq++;
-  peak = 0;
 }, 100);
 
 function status(since) {
@@ -138,7 +144,7 @@ function status(since) {
   const skip = since >= 0 ? Math.max(0, Math.min(hist.level.length, since + 1 - first)) : 0;
   return {
     configRev, configError,
-    history: { seq: hist.seq, intervalMs: 100, level: hist.level.slice(skip), gate: hist.gate.slice(skip),
+    history: { seq: hist.seq, intervalMs: IV, level: hist.level.slice(skip), gate: hist.gate.slice(skip),
       port1: hist.port1.slice(skip), port2: hist.port2.slice(skip) },
     levelDb: levelPercent > 0 ? 20 * Math.log10(levelPercent / 100) - 3 : -120,
     levelPercent, gate: gateName(), streaming: gate.streaming,
@@ -152,7 +158,7 @@ function status(since) {
     inputNode: cfg.inputNode, connectedNode: cfg.inputNode, captureRate: 48000, captureChannels: 2,
     codec: "PCMA", payloadType: 8, rtpRate: 8000,
     packetsSent, sendErrors: 0, samplesDropped: 0, bufferedSamples: gate.streaming ? 80 : 0,
-    lastError: "", lastRtpHeader: gate.streaming ? "8008a1b2c3d4e5f6deadbeef" : ""
+    lastError: knobs.errors.length ? knobs.errors[0].message : "", errors: knobs.errors, lastRtpHeader: gate.streaming ? "8008a1b2c3d4e5f6deadbeef" : ""
   };
 }
 

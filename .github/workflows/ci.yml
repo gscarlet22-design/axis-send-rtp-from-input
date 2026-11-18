@@ -25,6 +25,9 @@ jobs:
       - name: Python tests
         if: matrix.cc == 'gcc'
         run: python3 -m unittest discover -s tests -v
+      - name: Settings page preview matches the app's gate
+        if: matrix.cc == 'gcc'
+        run: make -C tests clean preview
 
   acap-build:
     name: ACAP build (${{ matrix.arch }})
