@@ -760,7 +760,7 @@ static void publish_status(const char* gate) {
     }
     snprintf(snap.input_node, sizeof snap.input_node, "%s", g_cfg.input_node);
     snprintf(snap.connected_node, sizeof snap.connected_node, "%s", g_impl.connected_name);
-    snprintf(snap.last_error, sizeof snap.last_error, "%s", current_error());
+    snprintf(snap.last_error, sizeof snap.last_error, "%.159s", current_error());
     snprintf(snap.last_rtp_header, sizeof snap.last_rtp_header, "%s", g_last_rtp_header);
     snprintf(snap.config_error, sizeof snap.config_error, "%s", g_cfg_save_error);
     snap.config_rev = g_cfg_rev_applied;

@@ -700,13 +700,16 @@ static void test_clock_samples_due(void) {
 
 static struct decimator g_dec;
 
-/* Gain in dB for a sine of `freq` Hz at `rate` Hz, after the filter settles. */
+/* Gain in dB for a sine of `freq` Hz at `rate` Hz, from the RMS of the output
+ * once the filter has settled. A peak would depend on where the 8 kHz samples
+ * land on the wave. */
 static double decimator_gain_db(unsigned rate, double freq) {
     const double pi = 3.14159265358979323846;
     const double amp = 0.5;
     unsigned n;
     unsigned outputs = 0;
-    float peak       = 0.f;
+    unsigned counted = 0;
+    double sumsq     = 0.0;
 
     if (!decimator_init(&g_dec, rate)) {
         return 999.0;
@@ -715,12 +718,16 @@ static double decimator_gain_db(unsigned rate, double freq) {
         float out;
         if (decimator_push(&g_dec, (float)(amp * sin(2.0 * pi * freq * n / rate)), &out)) {
             outputs++;
-            if (outputs > (unsigned)g_dec.taps && fabsf(out) > peak) {
-                peak = fabsf(out);
+            if (outputs > (unsigned)g_dec.taps) {
+                sumsq += (double)out * (double)out;
+                counted++;
             }
         }
     }
-    return peak > 0.f ? 20.0 * log10(peak / amp) : -200.0;
+    if (counted == 0 || sumsq <= 0.0) {
+        return -200.0;
+    }
+    return 20.0 * log10(sqrt(2.0 * sumsq / counted) / amp);
 }
 
 static void test_decimator_rates(void) {
