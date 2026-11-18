@@ -45,7 +45,7 @@
 #define RING_CAP 1600U
 #define RTP_SAMPLES 160U
 #define DEFAULT_NODE "AudioDevice0Input0.Unprocessed"
-#define HIST_LEN 64U
+#define HIST_LEN 256U /* 25.6 s: the page's 24 s chart is full on first load. A power of two keeps seq % HIST_LEN continuous across wrap. */
 #define HIST_INTERVAL_MS 100
 #define CFG_RELOAD_MS 1000
 #define AUDIO_WATCHDOG_MS 5000
@@ -405,14 +405,17 @@ static bool write_cfg(AXParameter* p, const struct cfg* want, const struct cfg* 
     if (want->trigger_port != have->trigger_port) {
         ok = set_param(p, "Trigger", trigger_name(want->trigger_port), err, err_len) && ok;
     }
-    ok = set_param(p, "DestinationIp", want->destination_ip, err, err_len) && ok;
+    /* Each write syncs over D-Bus, so skip values that haven't changed. */
+    if (strcmp(want->destination_ip, have->destination_ip) != 0) {
+        ok = set_param(p, "DestinationIp", want->destination_ip, err, err_len) && ok;
+    }
     ok = put_int(p, "DestinationPort", want->destination_port, have->destination_port, err, err_len) && ok;
     ok = put_int(p, "ThresholdDb", want->threshold_db, have->threshold_db, err, err_len) && ok;
     ok = put_int(p, "MarginDb", want->margin_db, have->margin_db, err, err_len) && ok;
     ok = put_int(p, "ActivationDelayMs", want->activation_delay_ms, have->activation_delay_ms, err, err_len) && ok;
     ok = put_int(p, "DeactivationDelayS", want->deactivation_delay_s, have->deactivation_delay_s, err, err_len) && ok;
     ok = put_int(p, "MaxOnS", want->max_on_s, have->max_on_s, err, err_len) && ok;
-    if (valid_node_name(want->input_node)) {
+    if (valid_node_name(want->input_node) && strcmp(want->input_node, have->input_node) != 0) {
         ok = set_param(p, "InputNode", want->input_node, err, err_len) && ok;
     }
     return ok;
@@ -1244,8 +1247,13 @@ static const struct pw_core_events core_events = {
     .error = on_core_error,
 };
 
-static char* status_json(void) {
+/* `since` is the last history sequence number the page already has, or -1.
+ * Only newer entries are sent, so a steady poll carries a few entries instead
+ * of the whole buffer. A proxy that drops the query string just gets the
+ * full buffer, which the page merges the same way. */
+static char* status_json(long long since) {
     struct status_snap snap;
+    unsigned skip = 0;
     json_t* root;
     json_t* hist;
     json_t* hist_level;
@@ -1267,8 +1275,13 @@ static char* status_json(void) {
     hist_gate  = json_array();
     hist_port1 = json_array();
     hist_port2 = json_array();
-    for (i = 0; i < snap.hist_count; i++) {
-        json_array_append_new(hist_level, json_real(floor((double)snap.hist_level[i] * 1000.0 + 0.5) / 1000.0));
+    if (since >= 0) {
+        long long first = (long long)snap.hist_seq - (long long)snap.hist_count;
+        long long want  = since + 1 - first;
+        skip            = want <= 0 ? 0 : want >= (long long)snap.hist_count ? snap.hist_count : (unsigned)want;
+    }
+    for (i = skip; i < snap.hist_count; i++) {
+        json_array_append_new(hist_level, json_real((double)snap.hist_level[i]));
         json_array_append_new(hist_gate, json_integer(snap.hist_gate[i]));
         json_array_append_new(hist_port1, json_integer(snap.hist_port1[i]));
         json_array_append_new(hist_port2, json_integer(snap.hist_port2[i]));
@@ -1313,7 +1326,9 @@ static char* status_json(void) {
     json_object_set_new(root, "bufferedSamples", json_integer(snap.buffered_samples));
     json_object_set_new(root, "lastError", json_string(snap.last_error));
     json_object_set_new(root, "lastRtpHeader", json_string(snap.last_rtp_header));
-    text = json_dumps(root, JSON_COMPACT);
+    /* Four significant digits keep quiet levels exact enough on a dB scale
+     * (0.003162 is -90.0 dBFS) without jansson's default 17. */
+    text = json_dumps(root, JSON_COMPACT | JSON_REAL_PRECISION(4));
     json_decref(root);
     return text;
 }
@@ -1612,7 +1627,9 @@ static void handle_client(int fd) {
         }
     }
     if (strcmp(method, "GET") == 0 && strstr(path, "/api/status") != NULL) {
-        char* json = status_json();
+        const char* q    = strstr(path, "since=");
+        long long since  = q != NULL ? strtoll(q + 6, NULL, 10) : -1;
+        char* json       = status_json(since < 0 ? -1 : since);
         http_send(fd, 200, "OK", json != NULL ? json : "{}");
         free(json);
         return;

@@ -42,6 +42,16 @@ done
 
 `acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_7_0_armv7hf.eap`.
 
+## Working on the settings page
+
+`tools/mock_device.js` serves the page with a fake device behind it, so you can work on the UI without a camera. It needs Node.js only:
+
+```bash
+node tools/mock_device.js
+```
+
+Then open http://localhost:8099/local/lineinrtp/. Options simulate a slow or unreliable device: `--latency` (ms per reply), `--save-ms` (ms per changed setting before a save is confirmed), `--fail` and `--hang` (fraction of status requests that fail or never answer). The same knobs can be changed while it runs with `curl -X POST localhost:8099/mock/control -d '{"hang":1}'`.
+
 ## Tests
 
 The pure logic (A-law encoder, address and node-name validation, and the gate state machine) lives in `app/rtpcore.c`, with no PipeWire or AXIS SDK dependencies, so it builds and tests on any Linux or macOS host:
@@ -108,7 +118,7 @@ Set the jack to line input on the device Audio page before trusting the threshol
 
 `GET /local/lineinrtp/api/status` returns level, gate, packet counts, and the last error. It also returns:
 
-- `history`: 100 ms entries of peak level (0–100 linear, fractional), gate code, and port states. Gate codes: 0 idle, 1 opening, 2 sending, 3 holding, 4 max-on re-arming, 5 test tone.
+- `history`: up to 25.6 s of 100 ms entries of peak level (0–100 linear, fractional), gate code, and port states. Gate codes: 0 idle, 1 opening, 2 sending, 3 holding, 4 max-on re-arming, 5 test tone. `history.seq` is one past the newest entry's sequence number. Pass `?since=<sequence number>` to get only newer entries; the settings page does this on every poll.
 - `configRev` and `configError`.
 
 `POST /local/lineinrtp/api/config` saves the fields above. The reply carries a `rev`, and the save is complete once `/api/status` reports `configRev` at or above that value. Status is viewer. Configuration is admin.

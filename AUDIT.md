@@ -8,8 +8,9 @@ Method: I read every file. Nothing was built or run on a device, so the findings
 - **1.5.0:** H1, H2, H3 and M9 fixed. M10 is fixed for the settings page: saves are confirmed by revision.
 - **1.6.0:** H1 and M5's scale concern are gone. The app now owns its threshold in dBFS (`ThresholdDb`) and no longer depends on the device's Audio detection level, so the VAPIX reader was removed.
 - **1.7.0:** M1, M2, M3, M4, M7, M8, L1, L2, L4, L5, L7 and L8 fixed, with host unit tests for each where the logic allows (`tests/`). The gate state machine, RTP header state, A-law encoder, validation and the decimation filter now live in `app/rtpcore.c`. Also fixed: disabling the app or losing capture during the activation delay left the gate "pending", and re-enabling skipped the delay.
+- **1.7.0 page:** polling halved to 2 per second and paused while the tab is hidden, each poll asks only for new history (L6), every request has a timeout so one unanswered request can't freeze the page, and a slow save is waited out for 30 s instead of being reported as failed after 8 s. The app keeps 25.6 s of history so the chart is full on first load, and skips re-writing unchanged string settings on save.
 - **Not yet verified on a device:** PipeWire recovery (1.5.0), and in 1.7.0 the CPU cost of the 217-tap filter on the C8110 (about 1.7 million multiply-adds per second) and the new error clearing.
-- **Open:** M5 (single-buffer peak; the dBFS threshold fixes its scale, not its dips), M6 (port numbering), L3 (version in the README is updated by hand), L6 (UI polling load), L9 (max-on doesn't apply to Always on or Test tone, which is probably intended) and L10.
+- **Open:** M5 (single-buffer peak; the dBFS threshold fixes its scale, not its dips), M6 (port numbering), L3 (version in the README is updated by hand), L9 (max-on doesn't apply to Always on or Test tone, which is probably intended) and L10.
 
 ## Summary
 

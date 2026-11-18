@@ -338,7 +338,10 @@
 const $ = (id) => document.getElementById(id);
 const N = 240;            /* chart window, 100 ms per entry */
 const KEEP = 360;         /* extra history so the preview has warm-up */
-const POLL_MS = 250;
+const POLL_MS = 500;       /* history arrives in 100 ms entries, so the chart stays exact */
+const STATUS_TIMEOUT_MS = 3000;
+const SAVE_TIMEOUT_MS = 8000;
+const CONFIRM_MS = 30000;  /* each changed setting is a D-Bus sync on the device */
 const GATE = ["idle", "pending", "on", "holding", "waiting", "test"];
 const LANE = { on: "var(--lane-send)", always: "var(--lane-send)", test: "var(--lane-send)",
                holding: "var(--lane-hold)", pending: "var(--lane-open)", waiting: "var(--lane-wait)" };
@@ -350,6 +353,11 @@ let draft = {};
 let hist = [];
 let lastSeq = -1;
 let failures = 0;
+let timedOut = false;
+let polling = false;
+let pollTimer = null;
+let pendingRev = 0;
+let noticeKey = "";
 let saving = false;
 let saveMsg = "";
 let saveErr = "";
@@ -376,6 +384,9 @@ function cfgFromStatus(s) {
     ip: s.destinationIp || "", port: s.destinationPort, node: s.inputNode || ""
   };
 }
+/* No status for a while: two failures in a row, or one request that timed out. */
+function isLost() { return failures >= 2 || (failures >= 1 && timedOut); }
+
 function cur() { return Object.assign({}, saved, draft); }
 function changedKeys() { return saved ? Object.keys(draft).filter((k) => draft[k] !== saved[k]) : []; }
 function setDraft(key, value) { draft[key] = value; saveMsg = ""; saveErr = ""; render(); }
@@ -588,7 +599,7 @@ function notice(text) {
 function renderChip() {
   const chip = $("chip");
   let cls = "", text = "Connecting…";
-  if (failures >= 3) { cls = "lost"; text = "Connection lost"; }
+  if (isLost()) { cls = "lost"; text = "Connection lost"; }
   else if (status) {
     const g = status.gate;
     if (!status.enabled) text = "Off";
@@ -617,7 +628,7 @@ function render() {
   $("save").textContent = saving ? "Saving…" : "Save changes";
   const st = $("saveState");
   st.className = saveErr ? "saveerr" : "";
-  st.textContent = saveErr || (dirty ? (changed.length === 1 ? "1 unsaved change" : changed.length + " unsaved changes") : (saveMsg || "All changes saved"));
+  st.textContent = saveErr || saveMsg || (dirty ? (changed.length === 1 ? "1 unsaved change" : changed.length + " unsaved changes") : "All changes saved");
 
   document.querySelectorAll("#modes button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === c.mode)));
   document.querySelectorAll("#triggers button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === c.trigger)));
@@ -660,10 +671,16 @@ function render() {
   $("copy").disabled = !c.ip || ipBad;
 
   const notices = [];
-  if (failures >= 3) notices.push(notice("Lost contact with the app. The values shown may be out of date."));
-  if (status && status.lastError) notices.push(notice(status.lastError));
-  if (c.mode !== "off" && !c.ip) notices.push(notice("Set a receiver IP address to start sending."));
-  $("notices").replaceChildren.apply($("notices"), notices);
+  if (isLost()) notices.push("Lost contact with the app. The values shown may be out of date. Retrying…");
+  if (status && status.lastError) notices.push(status.lastError);
+  if (c.mode !== "off" && !c.ip) notices.push("Set a receiver IP address to start sending.");
+  /* Rebuild only on a change: a new role=alert element is announced again, and
+     replacing it every poll made its text impossible to select. */
+  const key = notices.join("\n");
+  if (key !== noticeKey) {
+    noticeKey = key;
+    $("notices").replaceChildren.apply($("notices"), notices.map(notice));
+  }
 
   if (status) {
     const pct = Math.max(0, Math.min(100, Number(status.levelPercent) || 0));
@@ -713,8 +730,24 @@ function renderHint(H) {
   if (hint) { $("hintTitle").textContent = hint[0]; $("hintText").textContent = hint[1]; }
 }
 
+/* fetch() has no timeout of its own. Without one, a single request the device
+   never answers stops the poll loop and the page freezes on stale values. */
+async function fetchWithTimeout(url, opts, ms) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), ms);
+  try {
+    return await fetch(url, Object.assign({ cache: "no-store", signal: ctl.signal }, opts));
+  } catch (e) {
+    if (e.name === "AbortError") { const err = new Error("The device did not answer in time."); err.timeout = true; throw err; }
+    throw e;
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+/* Asks only for history newer than what the page has. */
 async function fetchStatus() {
-  const r = await fetch("api/status", { cache: "no-store" });
+  const r = await fetchWithTimeout("api/status" + (lastSeq >= 0 ? "?since=" + lastSeq : ""), {}, STATUS_TIMEOUT_MS);
   if (!r.ok) throw new Error("HTTP " + r.status);
   return r.json();
 }
@@ -725,6 +758,17 @@ function applyStatus(s) {
   mergeHistory(s.history);
   /* Drop draft keys that now match, so saved state wins once confirmed. */
   Object.keys(draft).forEach((k) => { if (draft[k] === saved[k]) delete draft[k]; });
+  /* A save the page stopped waiting for can still land later. */
+  if (pendingRev && !saving && s.configRev >= pendingRev) {
+    pendingRev = 0;
+    saveErr = s.configError || "";
+    if (!saveErr) flashSaved();
+  }
+}
+
+function flashSaved() {
+  saveMsg = "Saved";
+  setTimeout(() => { if (saveMsg === "Saved") { saveMsg = ""; render(); } }, 2500);
 }
 
 /* Reads the device's audio input type and gain every 30 s, for the readout
@@ -733,7 +777,7 @@ async function readDeviceAudio() {
   if (!status || Date.now() - lastFallback < 30000) return;
   lastFallback = Date.now();
   try {
-    const r = await fetch("/axis-cgi/param.cgi?action=list&group=AudioSource.A0", { cache: "no-store" });
+    const r = await fetchWithTimeout("/axis-cgi/param.cgi?action=list&group=AudioSource.A0", {}, STATUS_TIMEOUT_MS);
     const body = await r.text();
     const type = body.match(/AudioSource\.A0\.InputType=([^\r\n]*)/);
     const gain = body.match(/AudioSource\.A0\.InputGain=([^\r\n]*)/);
@@ -741,51 +785,68 @@ async function readDeviceAudio() {
   } catch (e) { /* the readout stays hidden */ }
 }
 
+/* One poll at a time. Polling stops while the tab is hidden and resumes at
+   once when it's shown again. */
 async function poll() {
+  pollTimer = null;
+  if (polling || document.hidden) return;
+  polling = true;
   try {
     applyStatus(await fetchStatus());
     failures = 0;
+    timedOut = false;
     readDeviceAudio();
   } catch (e) {
     failures++;
+    timedOut = !!e.timeout;
   }
+  polling = false;
   render();
-  setTimeout(poll, POLL_MS);
+  if (!document.hidden) pollTimer = setTimeout(poll, POLL_MS);
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && !polling && pollTimer === null) poll();
+});
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function save() {
   const c = cur();
   if (c.ip && !validIp(c.ip)) return;
-  saving = true; saveErr = ""; saveMsg = "";
+  saving = true; saveErr = ""; saveMsg = "Saving…"; pendingRev = 0;
   render();
+  const slow = setTimeout(() => { if (saving) { saveMsg = "Saving… the device is still applying the changes"; render(); } }, 3000);
   try {
     const body = {
       enabled: c.mode !== "off", forceOn: c.mode === "always", testMode: c.mode === "test", trigger: c.trigger,
       destinationIp: c.ip, destinationPort: c.port, thresholdDb: c.level, marginDb: c.margin, activationDelayMs: c.delay,
       deactivationDelayS: c.hold, maxOnS: c.maxOn, inputNode: c.node
     };
-    const r = await fetch("api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const r = await fetchWithTimeout("api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, SAVE_TIMEOUT_MS);
     const data = await r.json().catch(() => ({}));
     if (!r.ok || !data.ok) throw new Error(data.error || "Save failed (HTTP " + r.status + ")");
-    const deadline = Date.now() + 8000;
-    let confirmed = false;
-    while (Date.now() < deadline) {
-      const s = await fetchStatus();
-      if (!data.rev || s.configRev >= data.rev) {
+    pendingRev = data.rev || 0;
+    const deadline = Date.now() + CONFIRM_MS;
+    let confirmed = !data.rev;
+    while (!confirmed && Date.now() < deadline) {
+      await sleep(250);
+      let s;
+      try { s = await fetchStatus(); } catch (e) { continue; }   /* a missed poll isn't a failed save */
+      if (s.configRev >= data.rev) {
         if (s.configError) throw new Error(s.configError);
-        applyStatus(s); confirmed = true; break;
+        applyStatus(s); confirmed = true;
       }
-      await sleep(150);
     }
-    if (!confirmed) throw new Error("The app did not confirm the save. Check the values and try again.");
+    if (!confirmed) throw new Error("The device hasn't confirmed the save yet. This page will update if it does.");
+    pendingRev = 0;
     Object.keys(draft).forEach((k) => { if (draft[k] === c[k]) delete draft[k]; });
-    saveMsg = "Saved";
-    setTimeout(() => { saveMsg = ""; render(); }, 2500);
+    flashSaved();
   } catch (e) {
+    if (saveMsg.indexOf("Saving") === 0) saveMsg = "";
     saveErr = e.message;
   } finally {
+    clearTimeout(slow);
     saving = false;
     render();
   }
@@ -805,12 +866,19 @@ document.querySelectorAll(".slider").forEach((row) => {
     if (key === "level" && cur().margin > marginCap(value)) draft.margin = marginCap(value);
     setDraft(key, value);
   }));
+  /* On Enter or leaving the box, show the value that was actually kept:
+     typing -95 keeps -90, and an empty box goes back to the current value. */
+  row.querySelectorAll("input[type=number]").forEach((el) => el.addEventListener("change", () => {
+    const v = cur()[key];
+    el.value = v === undefined || v === null ? "" : String(v);
+  }));
 });
 $("ip").addEventListener("input", (e) => setDraft("ip", e.target.value.trim()));
 $("port").addEventListener("input", (e) => {
   const v = Math.round(Number(e.target.value));
   if (e.target.value !== "" && v >= 1 && v <= 65535) setDraft("port", v);
 });
+$("port").addEventListener("change", (e) => { e.target.value = String(cur().port); });
 $("node").addEventListener("input", (e) => setDraft("node", e.target.value.trim()));
 $("save").addEventListener("click", save);
 $("discard").addEventListener("click", () => { draft = {}; saveErr = ""; render(); });
