@@ -3,12 +3,13 @@
 Scope: `app/lineinrtp.c` (1,769 lines), `app/html/index.html`, `app/manifest.json`, `Makefile`, `Dockerfile`, `tools/listen_rtp.py` at commit `a4fa002` (v1.4.1).
 Method: I read every file. Nothing was built or run on a device, so the findings marked *verify* are inferred from the code and the PipeWire, ACAP and RTP specs.
 
-## Status in 1.5.0
+## Status
 
-- **Fixed:** H1, H2, H3 and M9. M10 is fixed for the settings page: saves are confirmed by revision.
-- **Not yet verified on a device:** the VAPIX read of AlarmLevel and PipeWire recovery.
-- **Open:** everything else below.
+- **1.5.0:** H1, H2, H3 and M9 fixed. M10 is fixed for the settings page: saves are confirmed by revision.
 - **1.6.0:** H1 and M5's scale concern are gone. The app now owns its threshold in dBFS (`ThresholdDb`) and no longer depends on the device's Audio detection level, so the VAPIX reader was removed.
+- **1.7.0:** M1, M2, M3, M4, M7, M8, L1, L2, L4, L5, L7 and L8 fixed, with host unit tests for each where the logic allows (`tests/`). The gate state machine, RTP header state, A-law encoder, validation and the decimation filter now live in `app/rtpcore.c`. Also fixed: disabling the app or losing capture during the activation delay left the gate "pending", and re-enabling skipped the delay.
+- **Not yet verified on a device:** PipeWire recovery (1.5.0), and in 1.7.0 the CPU cost of the 217-tap filter on the C8110 (about 1.7 million multiply-adds per second) and the new error clearing.
+- **Open:** M5 (single-buffer peak; the dBFS threshold fixes its scale, not its dips), M6 (port numbering), L3 (version in the README is updated by hand), L6 (UI polling load), L9 (max-on doesn't apply to Always on or Test tone, which is probably intended) and L10.
 
 ## Summary
 

@@ -12,6 +12,8 @@ This ACAP sends the C8110 line input as unicast G.711 A-law RTP while the input 
 
 PipeWire captures `AudioDevice0Input0.Unprocessed`. The app measures the input peak in dBFS. When it reaches the activation level, the app opens a gate after a short activation delay and holds it through brief gaps. While the gate is open it sends 20 ms G.711 A-law packets to the configured IPv4 address and UDP port. When the gate closes, packets stop.
 
+The capture is mixed to mono and passed through a 4 kHz low-pass filter before it is reduced to 8 kHz, so content above the telephone band doesn't fold back into it. The first packets after the gate opens carry up to 200 ms of audio from before it opened (the activation delay), so the start of the sound that triggered it isn't lost. The RTP timestamp keeps counting through quiet gaps, as RFC 3551 expects for silence suppression, and a failed send counts as a lost packet.
+
 The activation level is this app's own setting, `ThresholdDb`, from −90 to 0 dBFS in 1 dB steps. The gate closes once the peak drops below the activation level minus `MarginDb`. That closing level never goes below −90 dBFS, which is where silence on the C8110 sits. Before 1.6.0 the activation level followed the device's Audio detection setting, a whole number from 0 to 100 on a linear scale. That setting couldn't go below about −40 dBFS, so quiet microphone sources never triggered.
 
 Parameter reads and writes run on a separate control thread, so a save never stalls audio capture. If the PipeWire stream fails, or delivers no audio for 5 seconds, the app rebuilds it with a backoff of 1 to 30 seconds. If the PipeWire daemon goes away, the app exits so AXIS OS respawns it.
@@ -31,14 +33,14 @@ The activation level slider runs from −90 to 0 dBFS. The release margin slider
 
 ```bash
 for ARCH in armv7hf aarch64; do
-  docker build --platform linux/amd64 --build-arg ARCH=$ARCH -t lineinrtp:1.6.0-$ARCH .
-  id=$(docker create lineinrtp:1.6.0-$ARCH)
-  docker cp "$id":/opt/app/Line_Input_RTP_1_6_0_$ARCH.eap .
+  docker build --platform linux/amd64 --build-arg ARCH=$ARCH -t lineinrtp:1.7.0-$ARCH .
+  id=$(docker create lineinrtp:1.7.0-$ARCH)
+  docker cp "$id":/opt/app/Line_Input_RTP_1_7_0_$ARCH.eap .
   docker rm "$id"
 done
 ```
 
-`acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_6_0_armv7hf.eap`.
+`acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_7_0_armv7hf.eap`.
 
 ## Tests
 
@@ -61,7 +63,7 @@ Release packages are signed with the Axis ACAP Signing Service (https://www.axis
 Signed releases install on AXIS OS 12 and 13 without changing any device setting:
 
 ```bash
-curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_6_0_armv7hf.eap \
+curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_7_0_armv7hf.eap \
   "https://$DEVICE/axis-cgi/applications/upload.cgi"
 ```
 
@@ -95,7 +97,7 @@ Set the jack to line input on the device Audio page before trusting the threshol
 | ForceOn | no | Send the line input even when it is quiet. Always on in the Mode control |
 | TestMode | no | Send a 1 kHz test tone instead of the line input. Test tone in the Mode control |
 | Trigger | level | `level` (default), `port1`, or `port2`. A port uses that input instead of the audio level |
-| DestinationIp | empty | Unicast IPv4 address of the RTP listener. Multicast, 240.0.0.0/4, and 0.0.0.0/8 are rejected |
+| DestinationIp | empty | Unicast IPv4 address of the RTP listener. Multicast, 240.0.0.0/4 (including 255.255.255.255), loopback 127.0.0.0/8, and 0.0.0.0/8 are rejected |
 | DestinationPort | 49000 | UDP port |
 | ThresholdDb | -45 | Activation level in dBFS peak, −90 to 0 |
 | MarginDb | 6 | Close the gate this many dB below the activation level, 0 to 40. The closing level never goes below −90 dBFS |
@@ -116,7 +118,7 @@ Set the jack to line input on the device Audio page before trusting the threshol
 - Codec is G.711 A-law only. It is intelligible and matches a static RTP payload type. It is not a music codec.
 - The destination has to be a unicast IPv4 address. The app will not send multicast.
 - Changing the input node reconnects when that PipeWire node is already known. A node that has not appeared yet is picked up on the next registry event.
-- `AUDIT.md` lists the remaining medium and low findings from the 1.5.0 review.
+- `AUDIT.md` lists the findings from the 1.5.0 review and which ones are still open.
 
 ## License
 
