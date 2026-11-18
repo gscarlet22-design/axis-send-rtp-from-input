@@ -25,20 +25,22 @@ The page at `/local/lineinrtp/` has three parts:
 - **Preview.** Moving any setting replays the recorded input with the unsaved values and shows the result as a second timeline, before you save.
 - **One Mode control.** Off, Auto, Always on, and Test tone replace the separate Enabled, Force on, and Test mode switches. The trigger choice (audio level, I/O port 1, I/O port 2) shows only in Auto.
 
+You can drag the Opens and Closes lines on the chart directly. Dragging one line leaves the other in place unless it has to move to keep the margin between 0 and 40 dB. Hold Shift to move both lines together, and press Esc to cancel a drag. Each line can also take keyboard focus: the arrow keys move it 1 dB, Page Up and Page Down move it 6 dB.
+
 The activation level slider runs from −90 to 0 dBFS. The release margin slider runs from 0 to 40 dB, but its top end shrinks as the activation level nears −90, so the closing level stays at or above the floor. Lowering the activation level pulls the margin down with it when needed. "Saved" only appears after the app has written the values and read them back.
 
 ## Build
 
 ```bash
 for ARCH in armv7hf aarch64; do
-  docker build --platform linux/amd64 --build-arg ARCH=$ARCH -t lineinrtp:1.6.0-$ARCH .
-  id=$(docker create lineinrtp:1.6.0-$ARCH)
-  docker cp "$id":/opt/app/Line_Input_RTP_1_6_0_$ARCH.eap .
+  docker build --platform linux/amd64 --build-arg ARCH=$ARCH -t lineinrtp:1.6.1-$ARCH .
+  id=$(docker create lineinrtp:1.6.1-$ARCH)
+  docker cp "$id":/opt/app/Line_Input_RTP_1_6_1_$ARCH.eap .
   docker rm "$id"
 done
 ```
 
-`acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_6_0_armv7hf.eap`.
+`acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_6_1_armv7hf.eap`.
 
 ## Signing
 
@@ -49,7 +51,7 @@ Release packages are signed with the Axis ACAP Signing Service (https://www.axis
 Signed releases install on AXIS OS 12 and 13 without changing any device setting:
 
 ```bash
-curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_6_0_armv7hf.eap \
+curl --anyauth -u "$USER:$PASS" -F packfil=@signed_Line_Input_RTP_1_6_1_armv7hf.eap \
   "https://$DEVICE/axis-cgi/applications/upload.cgi"
 ```
 

@@ -16,7 +16,7 @@
             "vendor": "dnicholl.axis@gmail.com",
             "vendorId": "6ee443117c",
             "runMode": "respawn",
-            "version": "1.6.0",
+            "version": "1.6.1",
             "compatibleOsVersions": [
                 {
                     "min": "12.11.72",
