@@ -7,14 +7,15 @@ import time
 
 
 def alaw_to_linear(value):
+    """G.711 A-law byte to 16-bit linear PCM (ITU-T G.711 / Sun g711.c alaw2linear)."""
     value ^= 0x55
-    sign = value & 0x80
-    exponent = (value & 0x70) >> 4
-    data = value & 0x0F
-    sample = ((data << 4) + 8) << exponent
-    if sample > 0x7FFF:
-        sample = 0x7FFF
-    return -sample if sign else sample
+    segment = (value & 0x70) >> 4
+    sample = (value & 0x0F) << 4
+    if segment == 0:
+        sample += 8
+    else:
+        sample = (sample + 0x108) << (segment - 1)
+    return sample if value & 0x80 else -sample
 
 
 def main():

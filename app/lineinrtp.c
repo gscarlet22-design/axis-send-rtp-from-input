@@ -37,10 +37,11 @@
 #include <spa/param/audio/format-utils.h>
 #pragma GCC diagnostic pop
 
+#include "rtpcore.h"
+
 #define APP_NAME "lineinrtp"
 #define HTTP_PORT 2011
 #define NODE_MAX 32
-#define NAME_MAX_LEN 63
 #define RING_CAP 1600U
 #define RTP_SAMPLES 160U
 #define DEFAULT_NODE "AudioDevice0Input0.Unprocessed"
@@ -50,7 +51,6 @@
 #define AUDIO_WATCHDOG_MS 5000
 #define RETRY_MIN_MS 1000
 #define RETRY_MAX_MS 30000
-#define FLOOR_DB -90 /* lowest threshold; silence on the C8110 sits near -90 dBFS */
 
 struct cfg {
     bool enabled;
@@ -180,11 +180,7 @@ static uint32_t g_hist_seq;
 static int64_t g_hist_next_ms;
 static double g_hist_peak;
 static struct cfg g_cfg;
-static int64_t g_hot_since;
-static int64_t g_quiet_since;
-static int64_t g_active_since;
-static bool g_streaming;
-static bool g_waiting_for_clear;
+static struct gate g_gate;
 static bool g_marker = true;
 static double g_level_db = -120.0;
 static double g_level_percent;
@@ -233,89 +229,6 @@ static int64_t now_ms(void) {
 
 static void set_error(const char* text) {
     snprintf(g_last_error, sizeof g_last_error, "%s", text != NULL ? text : "");
-}
-
-/* ITU-T G.711 A-law, 13-bit linear magnitude to 8-bit. */
-static uint8_t linear_to_alaw(int16_t pcm) {
-    static const int16_t seg_end[8] = {0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF};
-    int mask;
-    int seg;
-    int aval;
-    int value;
-    int i;
-
-    value = pcm >> 3;
-    if (value >= 0) {
-        mask = 0xD5;
-    } else {
-        mask  = 0x55;
-        value = -value - 1;
-        if (value < 0) {
-            value = 0;
-        }
-    }
-    seg = 8;
-    for (i = 0; i < 8; i++) {
-        if (value <= seg_end[i]) {
-            seg = i;
-            break;
-        }
-    }
-    if (seg >= 8) {
-        return (uint8_t)(0x7F ^ mask);
-    }
-    aval = seg << 4;
-    if (seg < 2) {
-        aval |= (value >> 1) & 0x0F;
-    } else {
-        aval |= (value >> seg) & 0x0F;
-    }
-    return (uint8_t)(aval ^ mask);
-}
-
-/* Canonical dotted IPv4, and a unicast target. Rejects leading zeros, 0.0.0.0/8,
- * multicast 224.0.0.0/4, and the reserved 240.0.0.0/4 block. */
-static bool valid_ipv4(const char* text) {
-    unsigned a;
-    unsigned b;
-    unsigned c;
-    unsigned d;
-    char tail;
-    char canonical[16];
-
-    if (text == NULL || text[0] == '\0') {
-        return false;
-    }
-    if (sscanf(text, "%u.%u.%u.%u%c", &a, &b, &c, &d, &tail) != 4) {
-        return false;
-    }
-    if (a > 255 || b > 255 || c > 255 || d > 255 || a == 0 || a >= 224) {
-        return false;
-    }
-    snprintf(canonical, sizeof canonical, "%u.%u.%u.%u", a, b, c, d);
-    return strcmp(text, canonical) == 0;
-}
-
-static bool valid_node_name(const char* text) {
-    size_t i;
-    size_t n;
-
-    if (text == NULL) {
-        return false;
-    }
-    n = strlen(text);
-    if (n == 0 || n > NAME_MAX_LEN) {
-        return false;
-    }
-    for (i = 0; i < n; i++) {
-        char ch = text[i];
-        bool ok  = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
-                  ch == '.' || ch == '_' || ch == '-';
-        if (!ok) {
-            return false;
-        }
-    }
-    return true;
 }
 
 static int param_int(AXParameter* handle, const char* name, int fallback, int min_v, int max_v) {
@@ -496,57 +409,6 @@ static void trim_ring(unsigned keep) {
     }
 }
 
-static void stop_streaming(const char* reason) {
-    if (!g_streaming) {
-        return;
-    }
-    syslog(LOG_INFO, "RTP stopped (%s), level %.1f dBFS, packets %llu", reason, g_level_db,
-           (unsigned long long)g_packets_sent);
-    g_streaming   = false;
-    g_hot_since   = 0;
-    g_quiet_since = 0;
-    g_marker      = true;
-    clear_ring();
-}
-
-static void start_streaming(const char* reason) {
-    g_streaming    = true;
-    g_marker       = true;
-    g_quiet_since  = 0;
-    g_active_since = now_ms();
-    {
-        unsigned keep = (unsigned)g_cfg.activation_delay_ms * 8U;
-        if (keep < RTP_SAMPLES) {
-            keep = RTP_SAMPLES;
-        }
-        if (keep > RING_CAP) {
-            keep = RING_CAP;
-        }
-        trim_ring(keep);
-    }
-    syslog(LOG_INFO, "RTP started (%s), level %.1f dBFS, dest %s:%d", reason, g_level_db,
-           g_cfg.destination_ip, g_cfg.destination_port);
-}
-
-static const char* gate_name(void) {
-    if (g_waiting_for_clear) {
-        return "waiting";
-    }
-    if (g_streaming && g_quiet_since != 0) {
-        return "holding";
-    }
-    if (g_streaming && g_cfg.test_mode) {
-        return "test";
-    }
-    if (g_streaming) {
-        return "active";
-    }
-    if (g_hot_since != 0) {
-        return "pending";
-    }
-    return "inactive";
-}
-
 static int port_is_active(int which) {
     if (which == 1) {
         if (g_port_numbering == 2) {
@@ -638,89 +500,62 @@ static void* event_thread(void* unused) {
     return NULL;
 }
 
-static void update_gate(void) {
-    int64_t now = now_ms();
-    bool have_dest = g_cfg.enabled && g_cfg.destination_ip[0] != '\0';
+/* Side effects of the gate closing. The gate state itself lives in rtpcore.c. */
+static void streaming_stopped(const char* reason) {
+    syslog(LOG_INFO, "RTP stopped (%s), level %.1f dBFS, packets %llu", reason, g_level_db,
+           (unsigned long long)g_packets_sent);
+    g_marker = true;
+    clear_ring();
+}
 
-    if (!have_dest) {
-        g_waiting_for_clear = false;
-        stop_streaming(g_cfg.enabled ? "no destination" : "disabled");
-        return;
+static void streaming_started(const char* reason) {
+    unsigned keep = (unsigned)g_cfg.activation_delay_ms * 8U;
+
+    g_marker = true;
+    if (keep < RTP_SAMPLES) {
+        keep = RTP_SAMPLES;
     }
-    if (g_cfg.test_mode) {
-        g_waiting_for_clear = false;
-        if (!g_streaming) {
-            start_streaming("test tone");
-        }
-        return;
+    if (keep > RING_CAP) {
+        keep = RING_CAP;
     }
-    if (!g_impl.format_ready) {
-        stop_streaming("no capture");
-        return;
+    trim_ring(keep);
+    syslog(LOG_INFO, "RTP started (%s), level %.1f dBFS, dest %s:%d", reason, g_level_db,
+           g_cfg.destination_ip, g_cfg.destination_port);
+}
+
+static void stop_streaming(const char* reason) {
+    if (gate_stop(&g_gate)) {
+        streaming_stopped(reason);
     }
-    if (g_cfg.force_on) {
-        g_waiting_for_clear = false;
-        if (!g_streaming) {
-            start_streaming("force on");
-        }
-        return;
+}
+
+static void update_gate(void) {
+    struct gate_input in;
+    struct gate_result r;
+
+    memset(&in, 0, sizeof in);
+    in.enabled              = g_cfg.enabled;
+    in.have_destination     = g_cfg.destination_ip[0] != '\0';
+    in.test_mode            = g_cfg.test_mode;
+    in.force_on             = g_cfg.force_on;
+    in.format_ready         = g_impl.format_ready;
+    in.trigger_port         = g_cfg.trigger_port;
+    in.port_active          = g_cfg.trigger_port > 0 ? port_is_active(g_cfg.trigger_port) : -1;
+    in.level_percent        = g_level_percent;
+    in.threshold_db         = g_cfg.threshold_db;
+    in.margin_db            = g_cfg.margin_db;
+    in.activation_delay_ms  = g_cfg.activation_delay_ms;
+    in.deactivation_delay_s = g_cfg.deactivation_delay_s;
+    in.max_on_s             = g_cfg.max_on_s;
+
+    r = gate_step(&g_gate, &in, now_ms());
+    if (r.action == GATE_START) {
+        streaming_started(r.reason);
+    } else if (r.action == GATE_STOP) {
+        streaming_stopped(r.reason);
     }
-    bool hot = false;
-    bool idle = false;
-    if (g_cfg.trigger_port > 0) {
-        int active = port_is_active(g_cfg.trigger_port);
-        if (active < 0) {
-            stop_streaming("input state unknown");
-            return;
-        }
-        hot  = active == 1;
-        idle = !hot;
-    } else {
-        /* Threshold and release are dBFS peaks. The release level never goes
-         * below the -90 dBFS floor, so a large margin still lets the gate close. */
-        double peak_db    = g_level_percent > 0.0 ? 20.0 * log10(g_level_percent / 100.0) : -120.0;
-        double release_db = (double)(g_cfg.threshold_db - g_cfg.margin_db);
-        if (release_db < (double)FLOOR_DB) {
-            release_db = (double)FLOOR_DB;
-        }
-        hot  = peak_db >= (double)g_cfg.threshold_db;
-        idle = peak_db < release_db;
-    }
-    if (g_waiting_for_clear) {
-        stop_streaming("max on time");
-        if (idle) {
-            g_waiting_for_clear = false;
-            syslog(LOG_INFO, "Gate re-armed after max-on quiet period");
-        }
-        return;
-    }
-    if (!g_streaming) {
-        if (hot) {
-            if (g_hot_since == 0) {
-                g_hot_since = now;
-            }
-            if (now - g_hot_since >= g_cfg.activation_delay_ms) {
-                start_streaming(g_cfg.trigger_port > 0 ? "input" : "level");
-            }
-        } else {
-            g_hot_since = 0;
-        }
-        return;
-    }
-    if (g_cfg.max_on_s > 0 && now - g_active_since >= (int64_t)g_cfg.max_on_s * 1000) {
-        g_waiting_for_clear = true;
-        stop_streaming("max on time");
-        return;
-    }
-    if (idle) {
-        if (g_quiet_since == 0) {
-            g_quiet_since = now;
-        }
-        if (now - g_quiet_since >= (int64_t)g_cfg.deactivation_delay_s * 1000) {
-            stop_streaming("quiet");
-        }
-    } else {
-        g_quiet_since = 0;
+    if (r.rearmed) {
+        syslog(LOG_INFO, "Gate re-armed after max-on quiet period");
     }
 }
 
@@ -832,8 +667,8 @@ static void push_test_tone(unsigned samples) {
 static void drain_audio(void) {
     unsigned sent = 0;
 
-    if (!g_streaming) {
-        if (g_hot_since == 0) {
+    if (!g_gate.streaming) {
+        if (g_gate.hot_since == 0) {
             clear_ring();
         }
         return;
@@ -854,7 +689,7 @@ static void publish_status(const char* gate) {
 
     memset(&snap, 0, sizeof snap);
     snap.level_db             = g_level_db;
-    snap.streaming            = g_streaming;
+    snap.streaming            = g_gate.streaming;
     snap.enabled              = g_cfg.enabled;
     snap.force_on             = g_cfg.force_on;
     snap.test_mode            = g_cfg.test_mode;
@@ -1018,15 +853,15 @@ static void on_timeout(void* data, uint64_t expirations) {
     check_capture(impl, now);
     ensure_stream(impl, now);
     update_gate();
-    if (g_cfg.test_mode && g_streaming) {
+    if (g_cfg.test_mode && g_gate.streaming) {
         push_test_tone(80);
     }
     drain_audio();
-    gate = gate_name();
+    gate = gate_state(&g_gate, g_cfg.test_mode);
     record_history(now, gate);
     publish_status(gate);
 
-    if (g_streaming && now - g_last_report_ms >= 10000) {
+    if (g_gate.streaming && now - g_last_report_ms >= 10000) {
         g_last_report_ms = now;
         syslog(LOG_INFO, "Streaming level %.1f dBFS packets %llu errors %llu", g_level_db,
                (unsigned long long)g_packets_sent, (unsigned long long)g_send_errors);

@@ -9,3 +9,7 @@ app/package.conf
 app/param.conf
 learnings/
 tools/force-on.json
+
+# Host test binaries
+tests/test_rtpcore
+tests/__pycache__/

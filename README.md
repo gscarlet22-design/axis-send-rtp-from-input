@@ -40,6 +40,18 @@ done
 
 `acap-build` names each package from the friendly name, for example `Line_Input_RTP_1_6_0_armv7hf.eap`.
 
+## Tests
+
+The pure logic (A-law encoder, address and node-name validation, and the gate state machine) lives in `app/rtpcore.c`, with no PipeWire or AXIS SDK dependencies, so it builds and tests on any Linux or macOS host:
+
+```bash
+make -C tests            # build and run
+make -C tests SAN=1      # with AddressSanitizer and UBSan
+python3 -m unittest discover -s tests
+```
+
+GitHub Actions runs these on every push and pull request, with gcc and clang, and builds unsigned `.eap` packages for `armv7hf` and `aarch64`. The packages are attached to each run as artifacts.
+
 ## Signing
 
 Release packages are signed with the Axis ACAP Signing Service (https://www.axis.com/support/acap-signing). The service only signs a package whose `vendor` and `vendorId` match the signing account, so `app/manifest.json` carries that account's values. Signing appends a PGP signature to the unsigned `.eap`. Sign each architecture's package separately, and rebuild and re-sign for every release.
