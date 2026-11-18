@@ -257,7 +257,7 @@
       </div>
       <div>
         <h1>Line Input RTP</h1>
-        <div class="sub">Line input to G.711 A-law RTP</div>
+        <div class="sub">Line input to RTP for Audio Manager Pro</div>
       </div>
     </div>
     <div class="chip" id="chip" role="status" aria-live="polite"><i></i><span id="chipText">Connecting…</span></div>
@@ -327,7 +327,7 @@
     </div>
     <div class="stats">
       <div class="stat"><span>Input peak</span><strong id="stLevel">—</strong><small id="stLevelDb"></small></div>
-      <div class="stat"><span>Packets sent</span><strong id="stPackets">0</strong><small>50 per second while sending</small></div>
+      <div class="stat"><span>Packets sent</span><strong id="stPackets">0</strong><small id="stPacketsSub">50 per second while sending</small></div>
       <div class="stat"><span>Send errors</span><strong id="stErrors">0</strong><small>Since start</small></div>
       <div class="stat"><span>Samples dropped</span><strong id="stDropped">0</strong><small>Buffer overruns</small></div>
       <div class="stat"><span>Capture</span><strong id="stCapture">—</strong><small id="stCaptureSub"></small></div>
@@ -398,6 +398,22 @@
         </div>
         <p class="err" id="portErr" hidden>Use a UDP port from 1 to 65535.</p>
         <p class="err" id="ipErr" hidden>Use a unicast IPv4 address, such as 192.168.1.10. Multicast, broadcast and loopback are not sent.</p>
+        <div class="field">
+          <span class="flabel" id="codecLabel">Codec</span>
+          <div class="seg n3" role="group" aria-labelledby="codecLabel" id="codecs">
+            <button type="button" data-v="pcma">G.711</button>
+            <button type="button" data-v="l16-16000">L16 16 kHz</button>
+            <button type="button" data-v="l16-48000">L16 48 kHz</button>
+          </div>
+          <p class="help" id="codecHelp"></p>
+        </div>
+        <div class="row" id="ptRow">
+          <label style="flex:0 1 140px">Payload type
+            <input type="number" id="pt" min="96" max="127">
+          </label>
+          <p class="help" style="flex:1 1 160px;align-self:end;margin-bottom:8px">Must match the source in Audio Manager Pro. 96 unless you changed it there.</p>
+        </div>
+        <p class="err" id="ptErr" hidden>Use a payload type from 96 to 127.</p>
         <div class="field" style="gap:6px">
           <span class="flabel">Source URL for Audio Manager Pro</span>
           <div class="urlrow">
@@ -408,9 +424,10 @@
           </div>
         </div>
         <dl>
-          <dt>Codec</dt><dd>G.711 A-law (PCMA)</dd>
-          <dt>Payload type</dt><dd>8</dd>
-          <dt>Format</dt><dd>8 kHz mono, 20 ms packets</dd>
+          <dt>In Audio Manager Pro</dt><dd id="dAmp">G.711a - mono (8 kHz)</dd>
+          <dt>Payload type</dt><dd id="dPt">8</dd>
+          <dt>Format</dt><dd id="dFormat">8 kHz mono, 20 ms packets</dd>
+          <dt>Bandwidth</dt><dd id="dRate">about 85 kbit/s while sending</dd>
         </dl>
       </section>
 
@@ -469,6 +486,18 @@ let loadedAt = Date.now();
 let lastFallback = 0;
 let audioInput = { type: null, gain: null };
 let portBad = false;
+let ptBad = false;
+
+/* Codec choices: what the app sends, and the matching row in Audio Manager
+   Pro's source Codec settings. Bandwidth includes RTP, UDP and IP headers. */
+const CODECS = {
+  "pcma": { amp: "G.711a - mono (8 kHz)", rate: 8000, ms: 20, kbps: 85,
+    help: "Telephone quality: up to about 3.4 kHz. Fine for speech and paging; music sounds thin and grainy." },
+  "l16-16000": { amp: "L16 - mono (16 kHz)", rate: 16000, ms: 20, kbps: 280,
+    help: "Uncompressed, up to about 7 kHz. Clear speech; music still lacks its top end." },
+  "l16-48000": { amp: "L16 - mono (48 kHz)", rate: 48000, ms: 10, kbps: 800,
+    help: "Uncompressed, the full range to 20 kHz, exactly as captured. Best for music. Fine on a wired LAN." }
+};
 
 /* Slider positions for settings whose range is too wide for a linear slider:
    fine steps where most values sit, coarse ones at the top. The number box
@@ -496,7 +525,9 @@ function cfgFromStatus(s) {
     trigger: s.trigger || "level",
     level: typeof s.thresholdDb === "number" ? s.thresholdDb : -45,
     margin: s.marginDb, delay: s.activationDelayMs, hold: s.deactivationDelayS, maxOn: s.maxOnS,
-    ip: s.destinationIp || "", port: s.destinationPort, node: s.inputNode || ""
+    ip: s.destinationIp || "", port: s.destinationPort, node: s.inputNode || "",
+    codec: s.codec === "l16" ? "l16-" + (s.sampleRate === 16000 ? 16000 : 48000) : "pcma",
+    pt: typeof s.payloadType === "number" && s.payloadType >= 96 ? s.payloadType : 96
   };
 }
 /* No status for a while: two failures in a row, or one request that timed out. */
@@ -875,7 +906,7 @@ function render() {
   const dirty = changed.length > 0;
 
   $("save").hidden = $("discard").hidden = !dirty && !saving;
-  $("save").disabled = saving || portBad || (c.ip !== "" && !validIp(c.ip));
+  $("save").disabled = saving || portBad || ptBad || (c.ip !== "" && !validIp(c.ip));
   $("discard").disabled = saving;
   $("save").textContent = saving ? "Saving…" : "Save changes";
   const st = $("saveState");
@@ -922,6 +953,18 @@ function render() {
   syncInput($("node"), c.node);
   $("port").setAttribute("aria-invalid", String(portBad));
   $("portErr").hidden = !portBad;
+  const codec = CODECS[c.codec] || CODECS.pcma;
+  const isL16 = c.codec !== "pcma";
+  document.querySelectorAll("#codecs button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === c.codec)));
+  $("codecHelp").textContent = codec.help;
+  $("ptRow").hidden = !isL16;
+  syncInput($("pt"), c.pt);
+  $("pt").setAttribute("aria-invalid", String(ptBad));
+  $("ptErr").hidden = !(isL16 && ptBad);
+  $("dAmp").textContent = codec.amp;
+  $("dPt").textContent = isL16 ? String(c.pt) : "8";
+  $("dFormat").textContent = (codec.rate / 1000) + " kHz mono, " + codec.ms + " ms packets";
+  $("dRate").textContent = "about " + codec.kbps + " kbit/s while sending";
   const ipBad = c.ip !== "" && !validIp(c.ip);
   $("ip").setAttribute("aria-invalid", String(ipBad));
   $("ipErr").hidden = !ipBad;
@@ -945,6 +988,8 @@ function render() {
     $("stLevel").textContent = fmtDb(toDb(pct)) + " dB";
     $("stLevelDb").textContent = status.levelDb > -119 ? "RMS " + fmtDb(status.levelDb) + " dBFS" : "Silent";
     $("stPackets").textContent = Number(status.packetsSent).toLocaleString();
+    $("stPacketsSub").textContent = (status.packetMs > 0 ? Math.round(1000 / status.packetMs) : 50) + " per second while sending" +
+      (status.rtpCodec ? ", " + status.rtpCodec + " " + (status.rtpRate / 1000) + " kHz" : "");
     $("stErrors").textContent = Number(status.sendErrors).toLocaleString();
     $("stDropped").textContent = Number(status.samplesDropped).toLocaleString();
     $("stCapture").textContent = status.nodeConnected ? (status.captureRate / 1000) + " kHz" : "Waiting";
@@ -1071,7 +1116,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function save() {
   const c = cur();
-  if ((c.ip && !validIp(c.ip)) || portBad) return;
+  if ((c.ip && !validIp(c.ip)) || portBad || ptBad) return;
   saving = true; saveErr = ""; saveMsg = "Saving…"; pendingRev = 0;
   render();
   const slow = setTimeout(() => { if (saving) { saveMsg = "Saving… the device is still applying the changes"; render(); } }, 3000);
@@ -1079,7 +1124,8 @@ async function save() {
     const body = {
       enabled: c.mode !== "off", forceOn: c.mode === "always", testMode: c.mode === "test", trigger: c.trigger,
       destinationIp: c.ip, destinationPort: c.port, thresholdDb: c.level, marginDb: c.margin, activationDelayMs: c.delay,
-      deactivationDelayS: c.hold, maxOnS: c.maxOn, inputNode: c.node
+      deactivationDelayS: c.hold, maxOnS: c.maxOn, inputNode: c.node,
+      codec: c.codec === "pcma" ? "pcma" : "l16", sampleRate: c.codec === "l16-16000" ? 16000 : 48000, payloadType: c.pt
     };
     const r = await fetchWithTimeout("api/config", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, SAVE_TIMEOUT_MS);
     const data = await r.json().catch(() => ({}));
@@ -1112,6 +1158,14 @@ async function save() {
 
 document.querySelectorAll("#modes button").forEach((b) => b.addEventListener("click", () => setDraft("mode", b.dataset.v)));
 document.querySelectorAll("#triggers button").forEach((b) => b.addEventListener("click", () => setDraft("trigger", b.dataset.v)));
+document.querySelectorAll("#codecs button").forEach((b) => b.addEventListener("click", () => setDraft("codec", b.dataset.v)));
+$("pt").addEventListener("input", (e) => {
+  const raw = e.target.value.trim();
+  const v = Number(raw);
+  ptBad = !(raw !== "" && Number.isInteger(v) && v >= 96 && v <= 127);
+  if (!ptBad) setDraft("pt", v); else render();
+});
+$("pt").addEventListener("change", (e) => { if (!ptBad) e.target.value = String(cur().pt); });
 document.querySelectorAll(".slider").forEach((row) => {
   const key = row.dataset.key, min = Number(row.dataset.min), max = Number(row.dataset.max);
   const range = row.querySelector("input[type=range]");
@@ -1156,7 +1210,8 @@ $("port").addEventListener("change", (e) => { if (!portBad) e.target.value = Str
 $("node").addEventListener("input", (e) => setDraft("node", e.target.value.trim()));
 $("save").addEventListener("click", save);
 $("discard").addEventListener("click", () => {
-  draft = {}; saveErr = ""; portBad = false;
+  draft = {}; saveErr = ""; portBad = false; ptBad = false;
+  $("pt").value = saved ? String(saved.pt) : "";
   $("port").value = saved ? String(saved.port) : "";
   render();
 });

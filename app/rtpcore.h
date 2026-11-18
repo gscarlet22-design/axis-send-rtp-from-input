@@ -11,6 +11,7 @@
 #define RTPCORE_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #define NAME_MAX_LEN 63
@@ -78,7 +79,31 @@ const char* gate_state(const struct gate* g, bool test_mode);
 
 #define RTP_HEADER_LEN 12
 #define RTP_PT_PCMA 8
-#define RTP_CLOCK_HZ 8000
+#define RTP_CLOCK_HZ 8000 /* G.711 */
+#define RTP_MAX_PAYLOAD 1200 /* stays inside a 1500-byte Ethernet MTU with IP and UDP headers */
+
+/* What goes on the wire. G.711 A-law is 8 kHz telephone audio. L16 is
+ * uncompressed 16-bit big-endian PCM (RFC 3551 4.5.11), mono, at 16 or
+ * 48 kHz; AXIS Audio Manager Pro accepts both as an RTP source. */
+enum rtp_codec { CODEC_PCMA, CODEC_L16 };
+
+struct rtp_format {
+    enum rtp_codec codec;
+    unsigned rate;           /* sample rate and RTP clock, Hz */
+    unsigned packet_samples; /* samples per packet */
+    unsigned packet_ms;
+    uint8_t payload_type;
+};
+
+/* PCMA ignores rate and payload_type (always 8 kHz, PT 8, 20 ms). L16 takes
+ * rate 16000 or 48000 and a dynamic payload type 96-127; 48 kHz uses 10 ms
+ * packets so each stays under RTP_MAX_PAYLOAD. Returns false for anything
+ * else, leaving *f as PCMA. */
+bool rtp_format_make(struct rtp_format* f, enum rtp_codec codec, unsigned rate, int payload_type);
+
+/* Encodes n samples for the format into out (at least n * 2 bytes). Returns
+ * the payload length in bytes. */
+size_t rtp_encode(const struct rtp_format* f, const int16_t* pcm, unsigned n, uint8_t* out);
 
 /* RTP header state for one SSRC. The timestamp follows the 8 kHz sampling
  * clock through silence (RFC 3550 5.1, RFC 3551 4.1), and sequence numbers and
@@ -88,12 +113,19 @@ struct rtp_tx {
     uint16_t seq;
     uint32_t timestamp; /* timestamp of the next packet */
     uint32_t ssrc;
+    uint8_t payload_type;
+    unsigned clock_hz;
     bool marker;
     bool have_stop;
     int64_t stop_ms;
 };
 
+/* Starts as G.711: payload type 8, 8 kHz clock. */
 void rtp_tx_init(struct rtp_tx* tx, uint16_t seq, uint32_t timestamp, uint32_t ssrc);
+
+/* Switches payload type and clock. A new format is a new stream to the
+ * receiver, so it also takes a new SSRC and starts a talkspurt. */
+void rtp_tx_set_format(struct rtp_tx* tx, uint8_t payload_type, unsigned clock_hz, uint32_t ssrc);
 
 /* A talkspurt starts at now_ms with `buffered` samples of pre-roll already
  * captured. Sets the marker and moves the timestamp over the silent gap. */
@@ -114,14 +146,15 @@ uint64_t clock_samples_due(int64_t start_ms, int64_t now_ms, unsigned rate, uint
 
 /* ---------------------------------------------------------------- decimator */
 
-#define DECIM_MAX_FACTOR 24 /* 192 kHz to 8 kHz */
+#define DECIM_MAX_FACTOR 24 /* e.g. 192 kHz to 8 kHz */
 #define DECIM_TAPS_PER_FACTOR 36
 #define DECIM_MAX_TAPS (DECIM_MAX_FACTOR * DECIM_TAPS_PER_FACTOR + 1)
 
-/* Windowed-sinc low-pass FIR (Blackman, cutoff 4 kHz, about 1.2 kHz
- * transition at any input rate) followed by integer decimation to 8 kHz.
- * Replaces the 6-sample average, which barely attenuates 4-8 kHz and folds it
- * back into the speech band. */
+/* Windowed-sinc low-pass FIR (Blackman, cutoff at the output's Nyquist
+ * frequency, transition 15 % of the output rate) followed by integer
+ * decimation. At 8 kHz out that is a 4 kHz cutoff with about 1.2 kHz of
+ * transition. It replaced a 6-sample average, which barely attenuated 4-8 kHz
+ * and folded it back into the speech band. */
 struct decimator {
     int factor; /* 0 = not configured */
     int taps;
@@ -131,15 +164,16 @@ struct decimator {
     float hist[DECIM_MAX_TAPS];
 };
 
-/* Returns false (and leaves the decimator unconfigured) unless in_rate is a
- * whole multiple of 8000 Hz between 8 kHz and 192 kHz. */
-bool decimator_init(struct decimator* d, unsigned in_rate);
+/* Returns false (and leaves the decimator unconfigured) unless in_rate is
+ * out_rate times 1 to DECIM_MAX_FACTOR, and out_rate is at least 8 kHz. Equal
+ * rates pass samples straight through. */
+bool decimator_init(struct decimator* d, unsigned in_rate, unsigned out_rate);
 
 /* Clears the filter history, keeping the coefficients. */
 void decimator_reset(struct decimator* d);
 
-/* Feeds one input sample. Returns true and sets *out when an 8 kHz output
- * sample is ready. */
+/* Feeds one input sample. Returns true and sets *out when an output sample
+ * is ready. */
 bool decimator_push(struct decimator* d, float in, float* out);
 
 #endif

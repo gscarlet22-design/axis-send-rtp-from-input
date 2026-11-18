@@ -1,6 +1,6 @@
 # Line Input RTP
 
-This ACAP sends the C8110 line input as unicast G.711 A-law RTP while the input stays above a level threshold.
+This ACAP sends the C8110 line input as unicast RTP, either G.711 A-law or uncompressed L16, while the input stays above a level threshold.
 
 ## Prerequisites
 
@@ -10,7 +10,7 @@ This ACAP sends the C8110 line input as unicast G.711 A-law RTP while the input 
 
 ## How it works
 
-PipeWire captures `AudioDevice0Input0.Unprocessed`. The app measures the input peak in dBFS. When it reaches the activation level, the app opens a gate after a short activation delay and holds it through brief gaps. While the gate is open it sends 20 ms G.711 A-law packets to the configured IPv4 address and UDP port. When the gate closes, packets stop.
+PipeWire captures `AudioDevice0Input0.Unprocessed`. The app measures the input peak in dBFS. When it reaches the activation level, the app opens a gate after a short activation delay and holds it through brief gaps. While the gate is open it sends RTP packets in the chosen codec to the configured IPv4 address and UDP port. When the gate closes, packets stop.
 
 The capture is mixed to mono and passed through a 4 kHz low-pass filter before it is reduced to 8 kHz, so content above the telephone band doesn't fold back into it. The first packets after the gate opens carry up to 200 ms of audio from before it opened (the activation delay), so the start of the sound that triggered it isn't lost. The RTP timestamp keeps counting through quiet gaps, as RFC 3551 expects for silence suppression, and a failed send counts as a lost packet.
 
@@ -28,6 +28,8 @@ The page at `/local/lineinrtp/` has three parts:
 - **One Mode control.** Off, Auto, Always on, and Test tone replace the separate Enabled, Force on, and Test mode switches. The trigger choice (audio level, I/O port 1, I/O port 2) shows only in Auto.
 
 In a window 900 px or wider, the chart stays in view on the left while the settings scroll on the right, so you can watch the preview as you move a slider. The header with Save stays at the top at any width.
+
+The Destination card has a Codec choice. For music, pick L16 48 kHz and tick **L16 - mono (48 kHz)** with the same payload type in the Audio Manager Pro source. The card names the exact row to tick.
 
 The preview replays the app's own gate logic: the app records the input every 20 ms (about one PipeWire buffer), and the page runs each entry as two 10 ms ticks, the app's timer. CI checks that the page's replay matches the app's gate state for state (`make -C tests preview`).
 
@@ -64,7 +66,7 @@ Then open http://localhost:8099/local/lineinrtp/. Options simulate a slow or unr
 
 ## Tests
 
-The pure logic (A-law encoder, address and node-name validation, and the gate state machine) lives in `app/rtpcore.c`, with no PipeWire or AXIS SDK dependencies, so it builds and tests on any Linux or macOS host:
+The pure logic (A-law and L16 encoding, address and node-name validation, the gate state machine, RTP headers and the resampling filter) lives in `app/rtpcore.c`, with no PipeWire or AXIS SDK dependencies, so it builds and tests on any Linux or macOS host:
 
 ```bash
 make -C tests            # build and run
@@ -101,8 +103,14 @@ Open the app from the device's Apps page. The page is served at `/local/lineinrt
 
 Create an RTP source and leave multicast off.
 
-- Codec: G.711a, mono, 8 kHz
-- Payload type: 8
+- Codec: tick the one that matches the app's Codec setting, with the same payload type. The settings page shows the exact row to tick.
+
+| App codec | Audio Manager Pro codec | Payload type | Quality | Bandwidth while sending |
+| --- | --- | --- | --- | --- |
+| G.711 (default) | G.711a - mono (8 kHz) | 8 | Telephone, to about 3.4 kHz | about 85 kbit/s |
+| L16 16 kHz | L16 - mono (16 kHz) | 96 (settable 96–127) | Uncompressed, to about 7 kHz | about 280 kbit/s |
+| L16 48 kHz | L16 - mono (48 kHz) | 96 (settable 96–127) | Uncompressed, full range; best for music | about 800 kbit/s |
+
 - Listening port: the same port configured on the app (default 49000)
 - Optional source IP: the C8110
 
@@ -126,6 +134,9 @@ Set the jack to line input on the device Audio page before trusting the threshol
 | DeactivationDelayS | 2 | How long it must stay quiet |
 | MaxOnS | 0 | Force off after this many seconds. 0 disables the limit |
 | InputNode | AudioDevice0Input0.Unprocessed | PipeWire source |
+| Codec | pcma | `pcma` (G.711 A-law, 8 kHz, 20 ms packets) or `l16` (16-bit big-endian PCM, mono) |
+| SampleRate | 48000 | L16 only: 16000 (20 ms packets) or 48000 (10 ms packets, so each fits in one Ethernet frame). The capture rate must be a whole multiple of it |
+| PayloadType | 96 | L16 only: dynamic payload type, 96–127. Must match Audio Manager Pro |
 
 `GET /local/lineinrtp/api/status` returns level, gate, packet counts, and the last error. It also returns:
 
@@ -137,7 +148,9 @@ Set the jack to line input on the device Audio page before trusting the threshol
 
 ## Known limitations
 
-- Codec is G.711 A-law only. It is intelligible and matches a static RTP payload type. It is not a music codec.
+- G.711 is telephone quality and not a music codec. Use L16 48 kHz for music. Opus, which Audio Manager Pro also accepts, would cut L16's bandwidth by about ten times but needs libopus built into the app.
+- L16 is mono. A stereo source is mixed down.
+- Changing the codec starts a new RTP stream (new SSRC), so the receiver may take a moment to pick it up.
 - The destination has to be a unicast IPv4 address. The app will not send multicast.
 - Changing the input node reconnects when that PipeWire node is already known. A node that has not appeared yet is picked up on the next registry event.
 - `AUDIT.md` lists the findings from the 1.5.0 review and which ones are still open.

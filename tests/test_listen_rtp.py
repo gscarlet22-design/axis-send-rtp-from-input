@@ -37,5 +37,24 @@ class AlawDecodeTest(unittest.TestCase):
         self.assertEqual(len(set(values)), 128)
 
 
+class PayloadDecodeTest(unittest.TestCase):
+    def test_l16_is_big_endian_signed(self):
+        payload = bytes([0x00, 0x01, 0xFF, 0xFF, 0x80, 0x00, 0x7F, 0xFF])
+        self.assertEqual(listen_rtp.decode_payload(96, payload, 48000), [1, -1, -32768, 32767])
+
+    def test_l16_odd_byte_is_dropped(self):
+        self.assertEqual(listen_rtp.decode_payload(96, bytes([0x00, 0x02, 0x05])), [2])
+
+    def test_pcma(self):
+        self.assertEqual(listen_rtp.decode_payload(8, bytes([0xD5, 0x55])), [8, -8])
+
+    def test_formats(self):
+        self.assertEqual(listen_rtp.payload_format(8, 48000), ("PCMA", 8000))
+        self.assertEqual(listen_rtp.payload_format(96, 16000), ("L16", 16000))
+        self.assertEqual(listen_rtp.payload_format(11, 48000), ("L16", 44100))
+        self.assertIsNone(listen_rtp.payload_format(0, 48000))
+        self.assertEqual(listen_rtp.decode_payload(0, bytes([1, 2])), [])
+
+
 if __name__ == "__main__":
     unittest.main()

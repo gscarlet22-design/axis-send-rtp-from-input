@@ -50,7 +50,8 @@ const cfg = {
   enabled: true, forceOn: false, testMode: false, trigger: "level",
   destinationIp: "192.168.1.50", destinationPort: 49000,
   thresholdDb: -45, marginDb: 6, activationDelayMs: 200, deactivationDelayS: 2, maxOnS: 0,
-  inputNode: "AudioDevice0Input0.Unprocessed"
+  inputNode: "AudioDevice0Input0.Unprocessed",
+  codec: "pcma", sampleRate: 48000, payloadType: 96
 };
 let configRev = 0;
 let requestedRev = 0;
@@ -156,7 +157,9 @@ function status(since) {
     deactivationDelayS: cfg.deactivationDelayS, maxOnS: cfg.maxOnS,
     destinationIp: cfg.destinationIp, destinationPort: cfg.destinationPort,
     inputNode: cfg.inputNode, connectedNode: cfg.inputNode, captureRate: 48000, captureChannels: 2,
-    codec: "PCMA", payloadType: 8, rtpRate: 8000,
+    codec: cfg.codec, sampleRate: cfg.sampleRate, payloadType: cfg.payloadType,
+    rtpCodec: cfg.codec === "l16" ? "L16" : "PCMA", rtpPayloadType: cfg.codec === "l16" ? cfg.payloadType : 8,
+    rtpRate: cfg.codec === "l16" ? cfg.sampleRate : 8000, packetMs: cfg.codec === "l16" && cfg.sampleRate === 48000 ? 10 : 20,
     packetsSent, sendErrors: 0, samplesDropped: 0, bufferedSamples: gate.streaming ? 80 : 0,
     lastError: knobs.errors.length ? knobs.errors[0].message : "", errors: knobs.errors, lastRtpHeader: gate.streaming ? "8008a1b2c3d4e5f6deadbeef" : ""
   };
@@ -172,7 +175,8 @@ function validIp(ip) {
 function applyConfig(body) {
   const next = Object.assign({}, cfg);
   const ints = { destinationPort: [1, 65535], thresholdDb: [-90, 0], marginDb: [0, 40],
-    activationDelayMs: [0, 10000], deactivationDelayS: [0, 60], maxOnS: [0, 3600] };
+    activationDelayMs: [0, 10000], deactivationDelayS: [0, 60], maxOnS: [0, 3600], payloadType: [96, 127],
+    sampleRate: [16000, 48000] };
   for (const k of ["enabled", "forceOn", "testMode"]) {
     if (k in body) { if (typeof body[k] !== "boolean") return k + " must be true or false"; next[k] = body[k]; }
   }
@@ -183,6 +187,11 @@ function applyConfig(body) {
       next[k] = v;
     }
   }
+  if ("codec" in body) {
+    if (!["pcma", "l16"].includes(body.codec)) return "codec must be pcma or l16";
+    next.codec = body.codec;
+  }
+  if (next.sampleRate !== 16000 && next.sampleRate !== 48000) return "sampleRate must be 16000 or 48000";
   if ("trigger" in body) {
     if (!["level", "port1", "port2"].includes(body.trigger)) return "trigger must be level, port1 or port2";
     next.trigger = body.trigger;

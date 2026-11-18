@@ -42,8 +42,9 @@
 #define APP_NAME "lineinrtp"
 #define HTTP_PORT 2011
 #define NODE_MAX 32
-#define RING_CAP 1600U
-#define RTP_SAMPLES 160U
+/* The ring holds 200 ms at the stream's rate: 1,600 samples for G.711,
+ * 9,600 for L16 at 48 kHz. That's also the longest pre-roll. */
+#define RING_MAX 9600U
 #define DEFAULT_NODE "AudioDevice0Input0.Unprocessed"
 /* 20 ms entries, about one PipeWire buffer each, so the page's preview
  * replays nearly what the gate saw. 2048 entries is 41 s: the 24 s chart is
@@ -69,6 +70,9 @@ struct cfg {
     int deactivation_delay_s;
     int max_on_s;
     char input_node[NAME_MAX_LEN + 1];
+    int codec;        /* enum rtp_codec */
+    int sample_rate;  /* L16 only: 16000 or 48000 */
+    int payload_type; /* L16 only: 96-127 */
 };
 
 /* HTTP thread -> control thread. */
@@ -108,6 +112,10 @@ struct status_snap {
     int deactivation_delay_s;
     int max_on_s;
     int destination_port;
+    int codec;
+    int sample_rate;
+    int payload_type;
+    struct rtp_format fmt; /* what is on the wire now */
     double level_percent;
     int capture_rate;
     int capture_channels;
@@ -189,7 +197,9 @@ static struct rtp_tx g_rtp;
 static double g_level_db = -120.0;
 static double g_level_percent;
 static struct decimator g_decim;
-static int16_t g_ring[RING_CAP];
+static struct rtp_format g_fmt; /* main loop only */
+static unsigned g_ring_cap = RTP_CLOCK_HZ / 5;
+static int16_t g_ring[RING_MAX];
 static unsigned g_ring_r;
 static unsigned g_ring_w;
 static unsigned g_ring_count;
@@ -330,6 +340,8 @@ static void read_cfg(AXParameter* params, struct cfg* out, char* err, size_t err
         next.margin_db           = 6;
         next.activation_delay_ms = 200;
         next.deactivation_delay_s = 2;
+        next.sample_rate         = 48000;
+        next.payload_type        = 96;
         snprintf(next.input_node, sizeof next.input_node, "%s", DEFAULT_NODE);
         *out = next;
         return;
@@ -354,6 +366,16 @@ static void read_cfg(AXParameter* params, struct cfg* out, char* err, size_t err
     next.activation_delay_ms  = param_int(params, "ActivationDelayMs", 200, 0, 10000);
     next.deactivation_delay_s = param_int(params, "DeactivationDelayS", 2, 0, 60);
     next.max_on_s             = param_int(params, "MaxOnS", 0, 0, 3600);
+    {
+        char codec[16];
+        param_str(params, "Codec", codec, sizeof codec, "pcma");
+        next.codec = strcmp(codec, "l16") == 0 ? CODEC_L16 : CODEC_PCMA;
+    }
+    next.sample_rate  = param_int(params, "SampleRate", 48000, 8000, 48000);
+    next.payload_type = param_int(params, "PayloadType", 96, 96, 127);
+    if (next.sample_rate != 16000 && next.sample_rate != 48000) {
+        next.sample_rate = 48000;
+    }
     param_str(params, "DestinationIp", next.destination_ip, sizeof next.destination_ip, "");
     param_str(params, "InputNode", next.input_node, sizeof next.input_node, DEFAULT_NODE);
     if (!valid_node_name(next.input_node)) {
@@ -420,6 +442,11 @@ static bool write_cfg(AXParameter* p, const struct cfg* want, const struct cfg* 
     ok = put_int(p, "ActivationDelayMs", want->activation_delay_ms, have->activation_delay_ms, err, err_len) && ok;
     ok = put_int(p, "DeactivationDelayS", want->deactivation_delay_s, have->deactivation_delay_s, err, err_len) && ok;
     ok = put_int(p, "MaxOnS", want->max_on_s, have->max_on_s, err, err_len) && ok;
+    if (want->codec != have->codec) {
+        ok = set_param(p, "Codec", want->codec == CODEC_L16 ? "l16" : "pcma", err, err_len) && ok;
+    }
+    ok = put_int(p, "SampleRate", want->sample_rate, have->sample_rate, err, err_len) && ok;
+    ok = put_int(p, "PayloadType", want->payload_type, have->payload_type, err, err_len) && ok;
     if (valid_node_name(want->input_node) && strcmp(want->input_node, have->input_node) != 0) {
         ok = set_param(p, "InputNode", want->input_node, err, err_len) && ok;
     }
@@ -435,21 +462,21 @@ static void clear_ring(void) {
 /* While the gate is closed the ring is the pre-roll buffer, and losing its
  * oldest samples is expected. Only an overrun while sending counts as dropped. */
 static void push_pcm(int16_t sample) {
-    if (g_ring_count == RING_CAP) {
-        g_ring_r = (g_ring_r + 1U) % RING_CAP;
+    if (g_ring_count == g_ring_cap) {
+        g_ring_r = (g_ring_r + 1U) % g_ring_cap;
         g_ring_count--;
         if (g_gate.streaming) {
             g_samples_dropped++;
         }
     }
     g_ring[g_ring_w] = sample;
-    g_ring_w         = (g_ring_w + 1U) % RING_CAP;
+    g_ring_w         = (g_ring_w + 1U) % g_ring_cap;
     g_ring_count++;
 }
 
 static void trim_ring(unsigned keep) {
     while (g_ring_count > keep) {
-        g_ring_r = (g_ring_r + 1U) % RING_CAP;
+        g_ring_r = (g_ring_r + 1U) % g_ring_cap;
         g_ring_count--;
     }
 }
@@ -557,13 +584,13 @@ static void streaming_stopped(const char* reason) {
  * hears the sound that opened the gate. Capped by the ring at 200 ms. */
 static void streaming_started(const char* reason) {
     int64_t now   = now_ms();
-    unsigned keep = (unsigned)g_cfg.activation_delay_ms * 8U;
+    unsigned keep = (unsigned)((uint64_t)g_cfg.activation_delay_ms * g_fmt.rate / 1000U);
 
-    if (keep < RTP_SAMPLES) {
-        keep = RTP_SAMPLES;
+    if (keep < g_fmt.packet_samples) {
+        keep = g_fmt.packet_samples;
     }
-    if (keep > RING_CAP) {
-        keep = RING_CAP;
+    if (keep > g_ring_cap) {
+        keep = g_ring_cap;
     }
     if (g_cfg.test_mode) {
         keep            = 0;
@@ -579,6 +606,42 @@ static void streaming_started(const char* reason) {
 static void stop_streaming(const char* reason) {
     if (gate_stop(&g_gate)) {
         streaming_stopped(reason);
+    }
+}
+
+/* Puts the configured codec on the wire. A change of codec, rate or payload
+ * type ends the talkspurt and starts a new RTP stream (new SSRC), since the
+ * receiver can't follow a clock change inside one. Also points the
+ * decimator at the new output rate. */
+static void configure_audio(void) {
+    struct rtp_format want;
+
+    if (!rtp_format_make(&want, (enum rtp_codec)g_cfg.codec, (unsigned)g_cfg.sample_rate, g_cfg.payload_type)) {
+        set_error(ERR_CONFIG, "Unsupported codec settings, sending G.711");
+    }
+    if (want.codec != g_fmt.codec || want.rate != g_fmt.rate || want.payload_type != g_fmt.payload_type) {
+        uint32_t ssrc;
+        bool first = g_fmt.rate == 0;
+
+        stop_streaming("codec changed");
+        random_bytes(&ssrc, sizeof ssrc);
+        g_fmt      = want;
+        g_ring_cap = g_fmt.rate / 5U;
+        clear_ring();
+        rtp_tx_set_format(&g_rtp, g_fmt.payload_type, g_fmt.rate, first ? g_rtp.ssrc : ssrc);
+        g_tone_phase = 0.0;
+        syslog(LOG_INFO, "Codec %s, %u Hz, payload type %u, %u ms packets", g_fmt.codec == CODEC_L16 ? "L16" : "PCMA",
+               g_fmt.rate, g_fmt.payload_type, g_fmt.packet_ms);
+    }
+    if (g_impl.format_ready) {
+        unsigned in_rate = g_impl.info.info.raw.rate;
+        if (g_decim.factor == 0 || in_rate != (unsigned)g_decim.factor * g_fmt.rate) {
+            if (!decimator_init(&g_decim, in_rate, g_fmt.rate)) {
+                char text[160];
+                snprintf(text, sizeof text, "Capture rate %u Hz can't be reduced to %u Hz", in_rate, g_fmt.rate);
+                set_error(ERR_CAPTURE, text);
+            }
+        }
     }
 }
 
@@ -648,12 +711,15 @@ static int ensure_socket(void) {
 }
 
 static void send_packet(void) {
-    uint8_t packet[RTP_HEADER_LEN + RTP_SAMPLES];
+    uint8_t packet[RTP_HEADER_LEN + RTP_MAX_PAYLOAD];
+    int16_t pcm[RTP_MAX_PAYLOAD / 2];
+    const unsigned n = g_fmt.packet_samples;
+    size_t len;
     unsigned i;
     int fd;
     ssize_t sent;
 
-    if (g_ring_count < RTP_SAMPLES) {
+    if (g_ring_count < n || n > RTP_MAX_PAYLOAD / 2) {
         return;
     }
     fd = ensure_socket();
@@ -661,19 +727,20 @@ static void send_packet(void) {
         return;
     }
     rtp_tx_header(&g_rtp, packet);
-    for (i = 0; i < RTP_SAMPLES; i++) {
-        packet[RTP_HEADER_LEN + i] = linear_to_alaw(g_ring[g_ring_r]);
-        g_ring_r                   = (g_ring_r + 1U) % RING_CAP;
+    for (i = 0; i < n; i++) {
+        pcm[i]   = g_ring[g_ring_r];
+        g_ring_r = (g_ring_r + 1U) % g_ring_cap;
         g_ring_count--;
     }
+    len = RTP_HEADER_LEN + rtp_encode(&g_fmt, pcm, n, packet + RTP_HEADER_LEN);
     for (i = 0; i < RTP_HEADER_LEN; i++) {
         snprintf(g_last_rtp_header + (i * 2), 3, "%02x", packet[i]);
     }
-    sent = send(fd, packet, sizeof packet, MSG_DONTWAIT);
+    sent = send(fd, packet, len, MSG_DONTWAIT);
     /* The samples are gone either way, so the packet counts for sequence and
      * timestamp. A failed send is packet loss to the receiver. */
-    rtp_tx_advance(&g_rtp, RTP_SAMPLES);
-    if (sent != (ssize_t)sizeof packet) {
+    rtp_tx_advance(&g_rtp, n);
+    if (sent != (ssize_t)len) {
         int err = errno;
         g_send_errors++;
         if (g_send_errors == 1 || (g_send_errors % 100) == 0) {
@@ -688,14 +755,14 @@ static void send_packet(void) {
     clear_error(ERR_NETWORK);
 }
 
-/* 1 kHz sine at about -12 dBFS, already at the 8 kHz RTP rate. */
+/* 1 kHz sine at about -12 dBFS, generated at the stream's rate. */
 static void push_test_tone(unsigned samples) {
     unsigned i;
 
     for (i = 0; i < samples; i++) {
         double sample = sin(g_tone_phase) * (0.25 * 32767.0);
         push_pcm((int16_t)lrint(sample));
-        g_tone_phase += 2.0 * 3.141592653589793 * 1000.0 / 8000.0;
+        g_tone_phase += 2.0 * 3.141592653589793 * 1000.0 / (double)g_fmt.rate;
         if (g_tone_phase > 2.0 * 3.141592653589793) {
             g_tone_phase -= 2.0 * 3.141592653589793;
         }
@@ -704,22 +771,23 @@ static void push_test_tone(unsigned samples) {
     g_level_percent = 25.0;
 }
 
-/* Generates exactly 8,000 tone samples per second of wall-clock time, however
+/* Generates exactly one second of tone per second of wall-clock time, however
  * late or bunched the timer ticks are, so a receiver never underruns. */
 static void run_test_tone(int64_t now) {
-    uint64_t due = clock_samples_due(g_tone_start_ms, now, RTP_CLOCK_HZ, g_tone_produced);
+    uint64_t due = clock_samples_due(g_tone_start_ms, now, g_fmt.rate, g_tone_produced);
 
-    if (due > RING_CAP) {
+    if (due > g_ring_cap) {
         /* A stall longer than the ring: skip ahead rather than send a burst. */
-        g_tone_produced += due - RING_CAP;
-        due = RING_CAP;
+        g_tone_produced += due - g_ring_cap;
+        due = g_ring_cap;
     }
     push_test_tone((unsigned)due);
     g_tone_produced += due;
 }
 
-/* Sends up to 4 packets per 10 ms tick: steady state needs half of one, and
- * the headroom drains the pre-roll at 8x real time. */
+/* Sends up to 4 packets per 10 ms tick. Steady state needs half of one (G.711,
+ * 20 ms packets) or one (L16 48 kHz, 10 ms packets), and the headroom drains
+ * the pre-roll at 4-8x real time. */
 static void drain_audio(void) {
     unsigned sent = 0;
 
@@ -729,7 +797,7 @@ static void drain_audio(void) {
         }
         return;
     }
-    while (g_ring_count >= RTP_SAMPLES && sent < 4U) {
+    while (g_ring_count >= g_fmt.packet_samples && sent < 4U) {
         send_packet();
         sent++;
     }
@@ -753,6 +821,10 @@ static void publish_status(const char* gate) {
     snap.activation_delay_ms  = g_cfg.activation_delay_ms;
     snap.deactivation_delay_s = g_cfg.deactivation_delay_s;
     snap.max_on_s             = g_cfg.max_on_s;
+    snap.codec                = g_cfg.codec;
+    snap.sample_rate          = g_cfg.sample_rate;
+    snap.payload_type         = g_cfg.payload_type;
+    snap.fmt                  = g_fmt;
     snap.destination_port     = g_cfg.destination_port;
     snap.level_percent        = g_level_percent;
     snap.capture_rate         = g_impl.format_ready ? (int)g_impl.info.info.raw.rate : 0;
@@ -848,6 +920,7 @@ static void take_control_updates(void) {
         /* The revision and the values it confirms reach /api/status together. */
         g_cfg             = u.cfg;
         g_cfg_rev_applied = u.rev;
+        configure_audio();
         snprintf(g_cfg_save_error, sizeof g_cfg_save_error, "%s", u.save_error);
         if (u.cfg_error[0] != '\0') {
             set_error(ERR_CONFIG, u.cfg_error);
@@ -926,8 +999,10 @@ static void on_param_changed(void* data, uint32_t id, const struct spa_pod* para
     }
     spa_format_audio_raw_parse(param, &impl->info.info.raw);
     impl->format_ready = true;
-    if (!decimator_init(&g_decim, impl->info.info.raw.rate)) {
-        set_error(ERR_CAPTURE, "Capture rate is not a multiple of 8000 Hz");
+    if (!decimator_init(&g_decim, impl->info.info.raw.rate, g_fmt.rate)) {
+        char text[160];
+        snprintf(text, sizeof text, "Capture rate %u Hz can't be reduced to %u Hz", impl->info.info.raw.rate, g_fmt.rate);
+        set_error(ERR_CAPTURE, text);
     }
     syslog(LOG_INFO, "Capturing %s, %u ch, %u Hz, format %d, decimation %d (%d-tap filter)", impl->connected_name,
            impl->info.info.raw.channels, impl->info.info.raw.rate, impl->info.info.raw.format, g_decim.factor,
@@ -1330,9 +1405,15 @@ static char* status_json(long long since) {
     json_object_set_new(root, "connectedNode", json_string(snap.connected_node));
     json_object_set_new(root, "captureRate", json_integer(snap.capture_rate));
     json_object_set_new(root, "captureChannels", json_integer(snap.capture_channels));
-    json_object_set_new(root, "codec", json_string("PCMA"));
-    json_object_set_new(root, "payloadType", json_integer(8));
-    json_object_set_new(root, "rtpRate", json_integer(8000));
+    /* Settings, as saved. */
+    json_object_set_new(root, "codec", json_string(snap.codec == CODEC_L16 ? "l16" : "pcma"));
+    json_object_set_new(root, "sampleRate", json_integer(snap.sample_rate));
+    json_object_set_new(root, "payloadType", json_integer(snap.payload_type));
+    /* What is on the wire now. */
+    json_object_set_new(root, "rtpCodec", json_string(snap.fmt.codec == CODEC_L16 ? "L16" : "PCMA"));
+    json_object_set_new(root, "rtpPayloadType", json_integer(snap.fmt.payload_type));
+    json_object_set_new(root, "rtpRate", json_integer(snap.fmt.rate));
+    json_object_set_new(root, "packetMs", json_integer(snap.fmt.packet_ms));
     json_object_set_new(root, "packetsSent", json_integer((json_int_t)snap.packets_sent));
     json_object_set_new(root, "sendErrors", json_integer((json_int_t)snap.send_errors));
     json_object_set_new(root, "samplesDropped", json_integer((json_int_t)snap.samples_dropped));
@@ -1395,7 +1476,8 @@ static bool json_bool_field(json_t* root, const char* key, bool fallback, bool* 
 static bool json_has_config(json_t* root) {
     static const char* keys[] = {
         "enabled", "forceOn", "testMode", "trigger", "destinationIp", "destinationPort", "thresholdDb",
-        "marginDb", "activationDelayMs", "deactivationDelayS", "maxOnS", "inputNode", NULL,
+        "marginDb", "activationDelayMs", "deactivationDelayS", "maxOnS", "inputNode", "codec", "sampleRate",
+        "payloadType", NULL,
     };
     const char** key;
 
@@ -1460,6 +1542,9 @@ static char* config_from_body(const char* body, size_t length, int* http_code) {
     cfg.activation_delay_ms   = snap.activation_delay_ms;
     cfg.deactivation_delay_s  = snap.deactivation_delay_s;
     cfg.max_on_s              = snap.max_on_s;
+    cfg.codec                 = snap.codec;
+    cfg.sample_rate           = snap.sample_rate > 0 ? snap.sample_rate : 48000;
+    cfg.payload_type          = snap.payload_type > 0 ? snap.payload_type : 96;
     snprintf(cfg.destination_ip, sizeof cfg.destination_ip, "%s", snap.destination_ip);
     snprintf(cfg.input_node, sizeof cfg.input_node, "%s", snap.input_node[0] != '\0' ? snap.input_node : DEFAULT_NODE);
 
@@ -1491,6 +1576,26 @@ static char* config_from_body(const char* body, size_t length, int* http_code) {
     cfg.activation_delay_ms  = json_int_field(root, "activationDelayMs", cfg.activation_delay_ms, 0, 10000, &ok, err, sizeof err);
     cfg.deactivation_delay_s = json_int_field(root, "deactivationDelayS", cfg.deactivation_delay_s, 0, 60, &ok, err, sizeof err);
     cfg.max_on_s             = json_int_field(root, "maxOnS", cfg.max_on_s, 0, 3600, &ok, err, sizeof err);
+    cfg.payload_type         = json_int_field(root, "payloadType", cfg.payload_type, 96, 127, &ok, err, sizeof err);
+    cfg.sample_rate          = json_int_field(root, "sampleRate", cfg.sample_rate, 16000, 48000, &ok, err, sizeof err);
+    if (cfg.sample_rate != 16000 && cfg.sample_rate != 48000) {
+        ok = false;
+        snprintf(err, sizeof err, "sampleRate must be 16000 or 48000");
+    }
+    {
+        json_t* codec = json_object_get(root, "codec");
+        if (codec != NULL) {
+            const char* value = json_string_value(codec);
+            if (value != NULL && strcmp(value, "pcma") == 0) {
+                cfg.codec = CODEC_PCMA;
+            } else if (value != NULL && strcmp(value, "l16") == 0) {
+                cfg.codec = CODEC_L16;
+            } else {
+                ok = false;
+                snprintf(err, sizeof err, "codec must be pcma or l16");
+            }
+        }
+    }
 
     ip_value = json_object_get(root, "destinationIp");
     if (ip_value != NULL) {
@@ -1946,8 +2051,9 @@ int main(int argc, char* argv[]) {
         syslog(LOG_ERR, "Input events unavailable");
     }
 
-    syslog(LOG_INFO, "Line Input RTP started. Node %s, threshold %d dBFS, release %d dB, codec PCMA/8000 payload 8",
-           g_cfg.input_node, g_cfg.threshold_db, g_cfg.margin_db);
+    configure_audio();
+    syslog(LOG_INFO, "Line Input RTP started. Node %s, threshold %d dBFS, release %d dB", g_cfg.input_node,
+           g_cfg.threshold_db, g_cfg.margin_db);
     pw_main_loop_run(impl->loop);
 
     syslog(LOG_INFO, "Line Input RTP stopped");

@@ -98,6 +98,21 @@
                     "name": "InputNode",
                     "default": "AudioDevice0Input0.Unprocessed",
                     "type": "string"
+                },
+                {
+                    "name": "Codec",
+                    "default": "pcma",
+                    "type": "string"
+                },
+                {
+                    "name": "SampleRate",
+                    "default": "48000",
+                    "type": "int:16000,48000"
+                },
+                {
+                    "name": "PayloadType",
+                    "default": "96",
+                    "type": "int:96,127"
                 }
             ]
         }

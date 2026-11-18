@@ -238,10 +238,57 @@ const char* gate_state(const struct gate* g, bool test_mode) {
 
 void rtp_tx_init(struct rtp_tx* tx, uint16_t seq, uint32_t timestamp, uint32_t ssrc) {
     memset(tx, 0, sizeof *tx);
-    tx->seq       = seq;
-    tx->timestamp = timestamp;
-    tx->ssrc      = ssrc;
-    tx->marker    = true;
+    tx->seq          = seq;
+    tx->timestamp    = timestamp;
+    tx->ssrc         = ssrc;
+    tx->payload_type = RTP_PT_PCMA;
+    tx->clock_hz     = RTP_CLOCK_HZ;
+    tx->marker       = true;
+}
+
+void rtp_tx_set_format(struct rtp_tx* tx, uint8_t payload_type, unsigned clock_hz, uint32_t ssrc) {
+    tx->payload_type = payload_type & 0x7F;
+    tx->clock_hz     = clock_hz;
+    tx->ssrc         = ssrc;
+    tx->marker       = true;
+    tx->have_stop    = false;
+}
+
+bool rtp_format_make(struct rtp_format* f, enum rtp_codec codec, unsigned rate, int payload_type) {
+    f->codec          = CODEC_PCMA;
+    f->rate           = RTP_CLOCK_HZ;
+    f->packet_ms      = 20;
+    f->packet_samples = RTP_CLOCK_HZ / 50;
+    f->payload_type   = RTP_PT_PCMA;
+    if (codec == CODEC_PCMA) {
+        return true;
+    }
+    if (codec != CODEC_L16 || (rate != 16000 && rate != 48000) || payload_type < 96 || payload_type > 127) {
+        return false;
+    }
+    f->codec          = CODEC_L16;
+    f->rate           = rate;
+    f->packet_ms      = rate == 48000 ? 10 : 20;
+    f->packet_samples = rate / 1000 * f->packet_ms;
+    f->payload_type   = (uint8_t)payload_type;
+    return true;
+}
+
+size_t rtp_encode(const struct rtp_format* f, const int16_t* pcm, unsigned n, uint8_t* out) {
+    unsigned i;
+
+    if (f->codec == CODEC_L16) {
+        for (i = 0; i < n; i++) {
+            uint16_t v     = (uint16_t)pcm[i];
+            out[i * 2]     = (uint8_t)(v >> 8); /* network byte order */
+            out[i * 2 + 1] = (uint8_t)(v & 0xFF);
+        }
+        return (size_t)n * 2U;
+    }
+    for (i = 0; i < n; i++) {
+        out[i] = linear_to_alaw(pcm[i]);
+    }
+    return n;
 }
 
 void rtp_tx_talkspurt(struct rtp_tx* tx, int64_t now_ms, unsigned buffered) {
@@ -249,7 +296,7 @@ void rtp_tx_talkspurt(struct rtp_tx* tx, int64_t now_ms, unsigned buffered) {
     if (tx->have_stop && now_ms > tx->stop_ms) {
         /* The pre-roll was sampled before now, so its first sample sits
          * `buffered` samples before the gap's end. */
-        int64_t gap = (now_ms - tx->stop_ms) * RTP_CLOCK_HZ / 1000 - (int64_t)buffered;
+        int64_t gap = (now_ms - tx->stop_ms) * (int64_t)tx->clock_hz / 1000 - (int64_t)buffered;
         if (gap > 0) {
             tx->timestamp += (uint32_t)gap; /* wraps modulo 2^32, as RTP expects */
         }
@@ -265,7 +312,7 @@ void rtp_tx_stop(struct rtp_tx* tx, int64_t now_ms) {
 
 void rtp_tx_header(const struct rtp_tx* tx, uint8_t out[RTP_HEADER_LEN]) {
     out[0]  = 0x80; /* version 2, no padding, extension or CSRCs */
-    out[1]  = (uint8_t)((tx->marker ? 0x80 : 0x00) | RTP_PT_PCMA);
+    out[1]  = (uint8_t)((tx->marker ? 0x80 : 0x00) | (tx->payload_type & 0x7F));
     out[2]  = (uint8_t)(tx->seq >> 8);
     out[3]  = (uint8_t)(tx->seq & 0xFF);
     out[4]  = (uint8_t)(tx->timestamp >> 24);
@@ -296,7 +343,7 @@ uint64_t clock_samples_due(int64_t start_ms, int64_t now_ms, unsigned rate, uint
 
 /* ---------------------------------------------------------------- decimator */
 
-bool decimator_init(struct decimator* d, unsigned in_rate) {
+bool decimator_init(struct decimator* d, unsigned in_rate, unsigned out_rate) {
     const double pi = 3.14159265358979323846;
     double fc;
     double sum = 0.0;
@@ -304,10 +351,10 @@ bool decimator_init(struct decimator* d, unsigned in_rate) {
     int n;
 
     memset(d, 0, sizeof *d);
-    if (in_rate < RTP_CLOCK_HZ || in_rate % RTP_CLOCK_HZ != 0 || in_rate / RTP_CLOCK_HZ > DECIM_MAX_FACTOR) {
+    if (out_rate < 8000 || in_rate < out_rate || in_rate % out_rate != 0 || in_rate / out_rate > DECIM_MAX_FACTOR) {
         return false;
     }
-    d->factor = (int)(in_rate / RTP_CLOCK_HZ);
+    d->factor = (int)(in_rate / out_rate);
     if (d->factor == 1) {
         d->taps    = 1;
         d->coef[0] = 1.f;
@@ -315,7 +362,7 @@ bool decimator_init(struct decimator* d, unsigned in_rate) {
     }
     d->taps = d->factor * DECIM_TAPS_PER_FACTOR + 1;
     middle  = (d->taps - 1) / 2;
-    fc      = (RTP_CLOCK_HZ / 2.0) / (double)in_rate; /* cycles per input sample */
+    fc      = ((double)out_rate / 2.0) / (double)in_rate; /* cycles per input sample */
     for (n = 0; n < d->taps; n++) {
         int x       = n - middle;
         double sinc = x == 0 ? 2.0 * fc : sin(2.0 * pi * fc * x) / (pi * x);

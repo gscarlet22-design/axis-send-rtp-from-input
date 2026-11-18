@@ -700,10 +700,10 @@ static void test_clock_samples_due(void) {
 
 static struct decimator g_dec;
 
-/* Gain in dB for a sine of `freq` Hz at `rate` Hz, from the RMS of the output
+/* Gain in dB for a sine of `freq` Hz at `rate` Hz decimated to `out` Hz, from the RMS of the output
  * once the filter has settled. A peak would depend on where the 8 kHz samples
  * land on the wave. */
-static double decimator_gain_db(unsigned rate, double freq) {
+static double decimator_gain_db(unsigned rate, unsigned out, double freq) {
     const double pi = 3.14159265358979323846;
     const double amp = 0.5;
     unsigned n;
@@ -711,7 +711,7 @@ static double decimator_gain_db(unsigned rate, double freq) {
     unsigned counted = 0;
     double sumsq     = 0.0;
 
-    if (!decimator_init(&g_dec, rate)) {
+    if (!decimator_init(&g_dec, rate, out)) {
         return 999.0;
     }
     for (n = 0; n < rate; n++) { /* one second */
@@ -731,14 +731,18 @@ static double decimator_gain_db(unsigned rate, double freq) {
 }
 
 static void test_decimator_rates(void) {
-    CHECK(decimator_init(&g_dec, 48000) && g_dec.factor == 6 && g_dec.taps == 217);
-    CHECK(decimator_init(&g_dec, 16000) && g_dec.factor == 2);
-    CHECK(decimator_init(&g_dec, 192000) && g_dec.factor == 24 && g_dec.taps == DECIM_MAX_TAPS);
-    CHECK(decimator_init(&g_dec, 8000) && g_dec.factor == 1 && g_dec.taps == 1);
-    CHECK(!decimator_init(&g_dec, 44100) && g_dec.factor == 0);
-    CHECK(!decimator_init(&g_dec, 0));
-    CHECK(!decimator_init(&g_dec, 4000));
-    CHECK(!decimator_init(&g_dec, 200000));
+    CHECK(decimator_init(&g_dec, 48000, 8000) && g_dec.factor == 6 && g_dec.taps == 217);
+    CHECK(decimator_init(&g_dec, 16000, 8000) && g_dec.factor == 2);
+    CHECK(decimator_init(&g_dec, 192000, 8000) && g_dec.factor == 24 && g_dec.taps == DECIM_MAX_TAPS);
+    CHECK(decimator_init(&g_dec, 8000, 8000) && g_dec.factor == 1 && g_dec.taps == 1);
+    CHECK(decimator_init(&g_dec, 48000, 16000) && g_dec.factor == 3 && g_dec.taps == 109);
+    CHECK(decimator_init(&g_dec, 48000, 48000) && g_dec.factor == 1 && g_dec.taps == 1);
+    CHECK(!decimator_init(&g_dec, 44100, 8000) && g_dec.factor == 0);
+    CHECK(!decimator_init(&g_dec, 48000, 32000)); /* 1.5x isn't a whole factor */
+    CHECK(!decimator_init(&g_dec, 16000, 48000)); /* no upsampling */
+    CHECK(!decimator_init(&g_dec, 0, 8000));
+    CHECK(!decimator_init(&g_dec, 4000, 8000));
+    CHECK(!decimator_init(&g_dec, 200000, 8000));
 }
 
 static void test_decimator_output_rate(void) {
@@ -746,7 +750,7 @@ static void test_decimator_output_rate(void) {
     unsigned outputs = 0;
     float out;
 
-    CHECK(decimator_init(&g_dec, 48000));
+    CHECK(decimator_init(&g_dec, 48000, 8000));
     for (n = 0; n < 48000; n++) {
         if (decimator_push(&g_dec, 0.f, &out)) {
             outputs++;
@@ -763,7 +767,7 @@ static void test_decimator_dc_and_reset(void) {
     float out  = 0.f;
     float last = 0.f;
 
-    CHECK(decimator_init(&g_dec, 48000));
+    CHECK(decimator_init(&g_dec, 48000, 8000));
     for (n = 0; n < 4800; n++) {
         if (decimator_push(&g_dec, 0.25f, &out)) {
             last = out;
@@ -783,12 +787,12 @@ static void test_decimator_dc_and_reset(void) {
 /* AUDIT.md M4. The old 6-sample average passed 5 kHz at about -6 dB, which
  * aliased it to 3 kHz. */
 static void test_decimator_response_48k(void) {
-    double g1k  = decimator_gain_db(48000, 1000.0);
-    double g3k  = decimator_gain_db(48000, 3000.0);
-    double g5k  = decimator_gain_db(48000, 5000.0);
-    double g7k  = decimator_gain_db(48000, 7000.0);
-    double g12k = decimator_gain_db(48000, 12000.0);
-    double g20k = decimator_gain_db(48000, 20000.0);
+    double g1k  = decimator_gain_db(48000, 8000, 1000.0);
+    double g3k  = decimator_gain_db(48000, 8000, 3000.0);
+    double g5k  = decimator_gain_db(48000, 8000, 5000.0);
+    double g7k  = decimator_gain_db(48000, 8000, 7000.0);
+    double g12k = decimator_gain_db(48000, 8000, 12000.0);
+    double g20k = decimator_gain_db(48000, 8000, 20000.0);
 
     printf("  48 kHz: 1k %.2f dB, 3k %.2f, 5k %.1f, 7k %.1f, 12k %.1f, 20k %.1f\n", g1k, g3k, g5k, g7k, g12k, g20k);
     CHECK(fabs(g1k) < 0.1);
@@ -800,14 +804,100 @@ static void test_decimator_response_48k(void) {
 }
 
 static void test_decimator_response_16k(void) {
-    double g1k = decimator_gain_db(16000, 1000.0);
-    double g5k = decimator_gain_db(16000, 5000.0);
-    double g7k = decimator_gain_db(16000, 7000.0);
+    double g1k = decimator_gain_db(16000, 8000, 1000.0);
+    double g5k = decimator_gain_db(16000, 8000, 5000.0);
+    double g7k = decimator_gain_db(16000, 8000, 7000.0);
 
     printf("  16 kHz: 1k %.2f dB, 5k %.1f, 7k %.1f\n", g1k, g5k, g7k);
     CHECK(fabs(g1k) < 0.1);
     CHECK(g5k < -60.0);
     CHECK(g7k < -60.0);
+}
+
+/* L16 16 kHz from a 48 kHz capture: flat to about 6.8 kHz, and what would
+ * fold back from above 8 kHz is gone. */
+static void test_decimator_response_48k_to_16k(void) {
+    double g1k  = decimator_gain_db(48000, 16000, 1000.0);
+    double g6k  = decimator_gain_db(48000, 16000, 6000.0);
+    double g10k = decimator_gain_db(48000, 16000, 10000.0);
+    double g15k = decimator_gain_db(48000, 16000, 15000.0);
+
+    printf("  48 -> 16 kHz: 1k %.2f dB, 6k %.2f, 10k %.1f, 15k %.1f\n", g1k, g6k, g10k, g15k);
+    CHECK(fabs(g1k) < 0.1);
+    CHECK(fabs(g6k) < 0.5);
+    CHECK(g10k < -60.0);
+    CHECK(g15k < -60.0);
+}
+
+/* L16 48 kHz from a 48 kHz capture is untouched. */
+static void test_decimator_passthrough(void) {
+    float out = 0.f;
+
+    CHECK(decimator_init(&g_dec, 48000, 48000));
+    CHECK(decimator_push(&g_dec, 0.375f, &out));
+    CHECK(fabsf(out - 0.375f) < 1e-7f);
+    CHECK(fabs(decimator_gain_db(48000, 48000, 15000.0)) < 0.01);
+}
+
+/* ---------------------------------------------------------------- codecs */
+
+static void test_rtp_format(void) {
+    struct rtp_format f;
+
+    CHECK(rtp_format_make(&f, CODEC_PCMA, 48000, 100)); /* rate and PT ignored */
+    CHECK(f.codec == CODEC_PCMA && f.rate == 8000 && f.payload_type == 8);
+    CHECK(f.packet_ms == 20 && f.packet_samples == 160);
+
+    CHECK(rtp_format_make(&f, CODEC_L16, 48000, 96));
+    CHECK(f.codec == CODEC_L16 && f.rate == 48000 && f.payload_type == 96);
+    CHECK(f.packet_ms == 10 && f.packet_samples == 480);
+    CHECK(f.packet_samples * 2 <= RTP_MAX_PAYLOAD); /* 960 bytes: no IP fragmentation */
+
+    CHECK(rtp_format_make(&f, CODEC_L16, 16000, 127));
+    CHECK(f.rate == 16000 && f.packet_ms == 20 && f.packet_samples == 320 && f.payload_type == 127);
+
+    CHECK(!rtp_format_make(&f, CODEC_L16, 44100, 96));
+    CHECK(f.codec == CODEC_PCMA); /* left as PCMA */
+    CHECK(!rtp_format_make(&f, CODEC_L16, 32000, 96));
+    CHECK(!rtp_format_make(&f, CODEC_L16, 48000, 95));
+    CHECK(!rtp_format_make(&f, CODEC_L16, 48000, 128));
+    CHECK(!rtp_format_make(&f, CODEC_L16, 48000, 11));
+}
+
+static void test_rtp_encode(void) {
+    struct rtp_format f;
+    const int16_t pcm[4] = {0, 1, -1, -32768};
+    uint8_t out[8];
+
+    CHECK(rtp_format_make(&f, CODEC_L16, 48000, 96));
+    CHECK(rtp_encode(&f, pcm, 4, out) == 8);
+    CHECK(out[0] == 0x00 && out[1] == 0x00);
+    CHECK(out[2] == 0x00 && out[3] == 0x01); /* big-endian */
+    CHECK(out[4] == 0xFF && out[5] == 0xFF);
+    CHECK(out[6] == 0x80 && out[7] == 0x00);
+
+    CHECK(rtp_format_make(&f, CODEC_PCMA, 0, 0));
+    CHECK(rtp_encode(&f, pcm, 4, out) == 4);
+    CHECK(out[0] == linear_to_alaw(0) && out[3] == linear_to_alaw(-32768));
+}
+
+static void test_rtp_set_format(void) {
+    struct rtp_tx tx;
+    uint8_t h[RTP_HEADER_LEN];
+
+    rtp_tx_init(&tx, 10, 5000, 1);
+    rtp_tx_advance(&tx, 160);
+    rtp_tx_stop(&tx, 1000);
+    rtp_tx_set_format(&tx, 96, 48000, 0xCAFEF00D);
+    rtp_tx_header(&tx, h);
+    CHECK(h[1] == (0x80 | 96)); /* marker and the new payload type */
+    CHECK(h[8] == 0xCA && h[9] == 0xFE && h[10] == 0xF0 && h[11] == 0x0D);
+
+    /* The silent-gap jump uses the new clock: 1 s at 48 kHz. */
+    rtp_tx_advance(&tx, 480);
+    rtp_tx_stop(&tx, 2000);
+    rtp_tx_talkspurt(&tx, 3000, 0);
+    CHECK(tx.timestamp == 5000u + 160u + 480u + 48000u);
 }
 
 int main(void) {
@@ -843,6 +933,11 @@ int main(void) {
     test_decimator_dc_and_reset();
     test_decimator_response_48k();
     test_decimator_response_16k();
+    test_decimator_response_48k_to_16k();
+    test_decimator_passthrough();
+    test_rtp_format();
+    test_rtp_encode();
+    test_rtp_set_format();
 
     if (g_failures != 0) {
         fprintf(stderr, "FAILED: %d of %d checks\n", g_failures, g_checks);
