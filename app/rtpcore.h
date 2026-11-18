@@ -147,14 +147,16 @@ uint64_t clock_samples_due(int64_t start_ms, int64_t now_ms, unsigned rate, uint
 /* ---------------------------------------------------------------- decimator */
 
 #define DECIM_MAX_FACTOR 24 /* e.g. 192 kHz to 8 kHz */
-#define DECIM_TAPS_PER_FACTOR 36
+#define DECIM_CUTOFF 0.4625 /* fraction of the output rate */
+#define DECIM_TAPS_PER_FACTOR 48
 #define DECIM_MAX_TAPS (DECIM_MAX_FACTOR * DECIM_TAPS_PER_FACTOR + 1)
 
-/* Windowed-sinc low-pass FIR (Blackman, cutoff at the output's Nyquist
- * frequency, transition 15 % of the output rate) followed by integer
- * decimation. At 8 kHz out that is a 4 kHz cutoff with about 1.2 kHz of
- * transition. It replaced a 6-sample average, which barely attenuated 4-8 kHz
- * and folded it back into the speech band. */
+/* Windowed-sinc low-pass FIR (Blackman) followed by integer decimation. The
+ * cutoff sits at 46.25 % of the output rate, below its Nyquist frequency, so
+ * the transition band ends near Nyquist instead of straddling it. At 8 kHz
+ * out: flat to 3.4 kHz (-0.2 dB), -33 dB at 4 kHz, -78 dB from 4.2 kHz. It
+ * replaced a 6-sample average, which barely attenuated 4-8 kHz and folded it
+ * back into the speech band. */
 struct decimator {
     int factor; /* 0 = not configured */
     int taps;

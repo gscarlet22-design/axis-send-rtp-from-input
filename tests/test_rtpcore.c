@@ -731,11 +731,11 @@ static double decimator_gain_db(unsigned rate, unsigned out, double freq) {
 }
 
 static void test_decimator_rates(void) {
-    CHECK(decimator_init(&g_dec, 48000, 8000) && g_dec.factor == 6 && g_dec.taps == 217);
+    CHECK(decimator_init(&g_dec, 48000, 8000) && g_dec.factor == 6 && g_dec.taps == 289);
     CHECK(decimator_init(&g_dec, 16000, 8000) && g_dec.factor == 2);
     CHECK(decimator_init(&g_dec, 192000, 8000) && g_dec.factor == 24 && g_dec.taps == DECIM_MAX_TAPS);
     CHECK(decimator_init(&g_dec, 8000, 8000) && g_dec.factor == 1 && g_dec.taps == 1);
-    CHECK(decimator_init(&g_dec, 48000, 16000) && g_dec.factor == 3 && g_dec.taps == 109);
+    CHECK(decimator_init(&g_dec, 48000, 16000) && g_dec.factor == 3 && g_dec.taps == 145);
     CHECK(decimator_init(&g_dec, 48000, 48000) && g_dec.factor == 1 && g_dec.taps == 1);
     CHECK(!decimator_init(&g_dec, 44100, 8000) && g_dec.factor == 0);
     CHECK(!decimator_init(&g_dec, 48000, 32000)); /* 1.5x isn't a whole factor */
@@ -789,14 +789,21 @@ static void test_decimator_dc_and_reset(void) {
 static void test_decimator_response_48k(void) {
     double g1k  = decimator_gain_db(48000, 8000, 1000.0);
     double g3k  = decimator_gain_db(48000, 8000, 3000.0);
+    double g34k = decimator_gain_db(48000, 8000, 3400.0);
+    double g4k  = decimator_gain_db(48000, 8000, 4000.0);
+    double g44k = decimator_gain_db(48000, 8000, 4400.0);
     double g5k  = decimator_gain_db(48000, 8000, 5000.0);
     double g7k  = decimator_gain_db(48000, 8000, 7000.0);
     double g12k = decimator_gain_db(48000, 8000, 12000.0);
     double g20k = decimator_gain_db(48000, 8000, 20000.0);
 
     printf("  48 kHz: 1k %.2f dB, 3k %.2f, 5k %.1f, 7k %.1f, 12k %.1f, 20k %.1f\n", g1k, g3k, g5k, g7k, g12k, g20k);
+    printf("  48 kHz: 3.4k %.2f dB, 4k %.1f, 4.4k %.1f\n", g34k, g4k, g44k);
     CHECK(fabs(g1k) < 0.1);
     CHECK(fabs(g3k) < 0.5);
+    CHECK(fabs(g34k) < 0.5); /* the telephone band is intact */
+    CHECK(g4k < -30.0);      /* at Nyquist, where anything left folds onto itself */
+    CHECK(g44k < -60.0);     /* would fold to 3.6 kHz */
     CHECK(g5k < -60.0);
     CHECK(g7k < -60.0);
     CHECK(g12k < -60.0);

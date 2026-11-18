@@ -362,7 +362,7 @@ bool decimator_init(struct decimator* d, unsigned in_rate, unsigned out_rate) {
     }
     d->taps = d->factor * DECIM_TAPS_PER_FACTOR + 1;
     middle  = (d->taps - 1) / 2;
-    fc      = ((double)out_rate / 2.0) / (double)in_rate; /* cycles per input sample */
+    fc      = (double)out_rate * DECIM_CUTOFF / (double)in_rate; /* cycles per input sample */
     for (n = 0; n < d->taps; n++) {
         int x       = n - middle;
         double sinc = x == 0 ? 2.0 * fc : sin(2.0 * pi * fc * x) / (pi * x);

@@ -214,6 +214,7 @@ static bool g_logged_bad_format;
 static double g_tone_phase;
 static int64_t g_tone_start_ms;
 static uint64_t g_tone_produced;
+static bool g_tone_running; /* the tone clock is running for this stretch of test mode */
 static volatile sig_atomic_t g_port_active[3] = {-1, -1, -1};
 static volatile sig_atomic_t g_port_numbering;
 static GMainLoop* g_event_loop;
@@ -362,7 +363,7 @@ static void read_cfg(AXParameter* params, struct cfg* out, char* err, size_t err
     }
     next.destination_port     = param_int(params, "DestinationPort", 49000, 1, 65535);
     next.threshold_db         = param_int(params, "ThresholdDb", -45, -90, 0);
-    next.margin_db            = param_int(params, "MarginDb", 6, 0, 40);
+    next.margin_db            = param_int(params, "MarginDb", 6, 0, 90);
     next.activation_delay_ms  = param_int(params, "ActivationDelayMs", 200, 0, 10000);
     next.deactivation_delay_s = param_int(params, "DeactivationDelayS", 2, 0, 60);
     next.max_on_s             = param_int(params, "MaxOnS", 0, 0, 3600);
@@ -593,9 +594,7 @@ static void streaming_started(const char* reason) {
         keep = g_ring_cap;
     }
     if (g_cfg.test_mode) {
-        keep            = 0;
-        g_tone_start_ms = now;
-        g_tone_produced = 0;
+        keep = 0; /* the tone starts clean; on_timeout() starts its clock */
     }
     trim_ring(keep);
     rtp_tx_talkspurt(&g_rtp, now, g_ring_count);
@@ -607,6 +606,19 @@ static void stop_streaming(const char* reason) {
     if (gate_stop(&g_gate)) {
         streaming_stopped(reason);
     }
+}
+
+/* Points the decimator from the capture rate to the stream's rate. On failure
+ * it stays unconfigured, nothing reaches the ring, and the capture error says why. */
+static bool setup_decimator(unsigned in_rate) {
+    char text[160];
+
+    if (decimator_init(&g_decim, in_rate, g_fmt.rate)) {
+        return true;
+    }
+    snprintf(text, sizeof text, "Capture rate %u Hz can't be reduced to %u Hz", in_rate, g_fmt.rate);
+    set_error(ERR_CAPTURE, text);
+    return false;
 }
 
 /* Puts the configured codec on the wire. A change of codec, rate or payload
@@ -636,11 +648,7 @@ static void configure_audio(void) {
     if (g_impl.format_ready) {
         unsigned in_rate = g_impl.info.info.raw.rate;
         if (g_decim.factor == 0 || in_rate != (unsigned)g_decim.factor * g_fmt.rate) {
-            if (!decimator_init(&g_decim, in_rate, g_fmt.rate)) {
-                char text[160];
-                snprintf(text, sizeof text, "Capture rate %u Hz can't be reduced to %u Hz", in_rate, g_fmt.rate);
-                set_error(ERR_CAPTURE, text);
-            }
+            setup_decimator(in_rate);
         }
     }
 }
@@ -675,8 +683,12 @@ static void update_gate(void) {
     }
 }
 
+/* Opens and connects the UDP socket for the current destination. After a
+ * failure it waits a second before trying again, instead of on every packet. */
 static int ensure_socket(void) {
+    static int64_t retry_at;
     struct sockaddr_in addr;
+    int64_t now = now_ms();
 
     if (g_rtp_fd >= 0 && strcmp(g_rtp_ip, g_cfg.destination_ip) == 0 && g_rtp_port == g_cfg.destination_port) {
         return g_rtp_fd;
@@ -684,7 +696,12 @@ static int ensure_socket(void) {
     if (g_rtp_fd >= 0) {
         close(g_rtp_fd);
         g_rtp_fd = -1;
+        retry_at = 0; /* a new destination gets a try right away */
     }
+    if (now < retry_at) {
+        return -1;
+    }
+    retry_at = now + 1000;
     g_rtp_fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (g_rtp_fd < 0) {
         set_error(ERR_NETWORK, "Could not open UDP socket");
@@ -722,10 +739,10 @@ static void send_packet(void) {
     if (g_ring_count < n || n > RTP_MAX_PAYLOAD / 2) {
         return;
     }
+    /* Without a socket the packet is lost like a failed send: its samples are
+     * dropped and sequence and timestamp still advance, so the receiver sees
+     * a gap rather than audio spliced across it. */
     fd = ensure_socket();
-    if (fd < 0) {
-        return;
-    }
     rtp_tx_header(&g_rtp, packet);
     for (i = 0; i < n; i++) {
         pcm[i]   = g_ring[g_ring_r];
@@ -736,14 +753,15 @@ static void send_packet(void) {
     for (i = 0; i < RTP_HEADER_LEN; i++) {
         snprintf(g_last_rtp_header + (i * 2), 3, "%02x", packet[i]);
     }
-    sent = send(fd, packet, len, MSG_DONTWAIT);
+    sent = fd >= 0 ? send(fd, packet, len, MSG_DONTWAIT) : -1;
     /* The samples are gone either way, so the packet counts for sequence and
      * timestamp. A failed send is packet loss to the receiver. */
     rtp_tx_advance(&g_rtp, n);
     if (sent != (ssize_t)len) {
         int err = errno;
         g_send_errors++;
-        if (g_send_errors == 1 || (g_send_errors % 100) == 0) {
+        /* ensure_socket() already reported a missing socket. */
+        if (fd >= 0 && (g_send_errors == 1 || (g_send_errors % 100) == 0)) {
             char text[160];
             syslog(LOG_WARNING, "RTP send failed: %s", strerror(err));
             snprintf(text, sizeof text, "RTP send failed: %s", strerror(err));
@@ -769,6 +787,19 @@ static void push_test_tone(unsigned samples) {
     }
     g_level_db = -12.0;
     g_level_percent = 25.0;
+}
+
+/* Starts the tone's clock. Called whenever test mode begins with the gate
+ * open, including a switch to Test tone in the middle of a talkspurt: any line
+ * audio still buffered is dropped and the tone starts a new talkspurt, instead
+ * of the clock counting from a stale start and sending a burst. */
+static void start_test_tone(int64_t now) {
+    clear_ring();
+    g_tone_start_ms = now;
+    g_tone_produced = 0;
+    g_tone_phase    = 0.0;
+    g_tone_running  = true;
+    g_rtp.marker    = true;
 }
 
 /* Generates exactly one second of tone per second of wall-clock time, however
@@ -917,16 +948,23 @@ static void take_control_updates(void) {
     pthread_mutex_unlock(&g_mu);
 
     if (u.have_cfg) {
+        /* A network error belongs to the destination it happened with. Once
+         * the destination changes, or sending is switched off, it's stale. */
+        if (strcmp(u.cfg.destination_ip, g_cfg.destination_ip) != 0 ||
+            u.cfg.destination_port != g_cfg.destination_port || (g_cfg.enabled && !u.cfg.enabled)) {
+            clear_error(ERR_NETWORK);
+        }
         /* The revision and the values it confirms reach /api/status together. */
         g_cfg             = u.cfg;
         g_cfg_rev_applied = u.rev;
-        configure_audio();
         snprintf(g_cfg_save_error, sizeof g_cfg_save_error, "%s", u.save_error);
         if (u.cfg_error[0] != '\0') {
             set_error(ERR_CONFIG, u.cfg_error);
         } else {
             clear_error(ERR_CONFIG);
         }
+        /* After the config error slot is settled, so a codec error it sets stays. */
+        configure_audio();
     }
 }
 
@@ -967,7 +1005,12 @@ static void on_timeout(void* data, uint64_t expirations) {
     ensure_stream(impl, now);
     update_gate();
     if (g_cfg.test_mode && g_gate.streaming) {
+        if (!g_tone_running) {
+            start_test_tone(now);
+        }
         run_test_tone(now);
+    } else {
+        g_tone_running = false;
     }
     drain_audio();
     gate = gate_state(&g_gate, g_cfg.test_mode);
@@ -999,11 +1042,7 @@ static void on_param_changed(void* data, uint32_t id, const struct spa_pod* para
     }
     spa_format_audio_raw_parse(param, &impl->info.info.raw);
     impl->format_ready = true;
-    if (!decimator_init(&g_decim, impl->info.info.raw.rate, g_fmt.rate)) {
-        char text[160];
-        snprintf(text, sizeof text, "Capture rate %u Hz can't be reduced to %u Hz", impl->info.info.raw.rate, g_fmt.rate);
-        set_error(ERR_CAPTURE, text);
-    }
+    setup_decimator(impl->info.info.raw.rate);
     syslog(LOG_INFO, "Capturing %s, %u ch, %u Hz, format %d, decimation %d (%d-tap filter)", impl->connected_name,
            impl->info.info.raw.channels, impl->info.info.raw.rate, impl->info.info.raw.format, g_decim.factor,
            g_decim.taps);
@@ -1572,7 +1611,7 @@ static char* config_from_body(const char* body, size_t length, int* http_code) {
     }
     cfg.destination_port     = json_int_field(root, "destinationPort", cfg.destination_port, 1, 65535, &ok, err, sizeof err);
     cfg.threshold_db         = json_int_field(root, "thresholdDb", cfg.threshold_db, -90, 0, &ok, err, sizeof err);
-    cfg.margin_db            = json_int_field(root, "marginDb", cfg.margin_db, 0, 40, &ok, err, sizeof err);
+    cfg.margin_db            = json_int_field(root, "marginDb", cfg.margin_db, 0, 90, &ok, err, sizeof err);
     cfg.activation_delay_ms  = json_int_field(root, "activationDelayMs", cfg.activation_delay_ms, 0, 10000, &ok, err, sizeof err);
     cfg.deactivation_delay_s = json_int_field(root, "deactivationDelayS", cfg.deactivation_delay_s, 0, 60, &ok, err, sizeof err);
     cfg.max_on_s             = json_int_field(root, "maxOnS", cfg.max_on_s, 0, 3600, &ok, err, sizeof err);

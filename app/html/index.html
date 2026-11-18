@@ -362,9 +362,9 @@
           <input id="sLevel" type="range" min="-90" max="0" step="1">
           <p class="help" data-help="level">Opens when the input peak reaches this level, in dBFS.</p>
         </div>
-        <div class="slider" data-key="margin" data-min="0" data-max="40">
-          <div class="top"><label for="sMargin">Release margin</label><span class="num"><input type="number" min="0" max="40" step="1" aria-label="Release margin, exact value"><span>dB</span></span></div>
-          <input id="sMargin" type="range" min="0" max="40" step="1">
+        <div class="slider" data-key="margin" data-min="0" data-max="90">
+          <div class="top"><label for="sMargin">Release margin</label><span class="num"><input type="number" min="0" max="90" step="1" aria-label="Release margin, exact value"><span>dB</span></span></div>
+          <input id="sMargin" type="range" min="0" max="90" step="1">
           <p class="help" data-help="margin"></p>
         </div>
         <div class="slider" data-key="delay" data-min="0" data-max="10000">
@@ -487,6 +487,9 @@ let lastFallback = 0;
 let audioInput = { type: null, gain: null };
 let portBad = false;
 let ptBad = false;
+/* A bad payload type only matters for L16. With G.711 the box is hidden and
+   ignored, so it mustn't block Save. */
+const ptBlocks = (c) => ptBad && c.codec !== "pcma";
 
 /* Codec choices: what the app sends, and the matching row in Audio Manager
    Pro's source Codec settings. Bandwidth includes RTP, UDP and IP headers. */
@@ -563,7 +566,7 @@ function mergeHistory(h) {
 /* BEGIN preview-sim. Self-contained: tests/test_preview.js loads this block
    on its own and checks simulate() against gate_step() in app/rtpcore.c. */
 const DB_MIN = -90;       /* also the lowest threshold: C8110 silence sits near -90 dBFS */
-const MARGIN_MAX = 40;
+const MARGIN_MAX = 90;    /* the closing level can go all the way to the floor */
 const TICK_MS = 10;       /* the app's timer: it decides every 10 ms */
 /* Closing level in dBFS: threshold minus margin, never below the floor. */
 const releaseDb = (c) => Math.max(DB_MIN, c.level - c.margin);
@@ -703,7 +706,7 @@ function setAria(el, min, max, now, text) {
 
 /* Sets the activation level and the closing level together, from the chart.
    The margin stays between 0 and marginCap(level), so the Closes line can't
-   go above Opens, more than 40 dB under it, or below the -90 dB floor. */
+   go above Opens or below the -90 dB floor. */
 function setThresholds(level, rel) {
   const lv = Math.max(DB_MIN, Math.min(0, Math.round(level)));
   const margin = Math.max(0, Math.min(marginCap(lv), lv - Math.round(rel)));
@@ -845,7 +848,7 @@ function renderChart(c, dirty) {
   $("caption").textContent = caption;
   const last = view[view.length - 1];
   $("plotSvg").setAttribute("aria-label", "Input peak in dBFS over the last 24 seconds" + (last && last.v !== null ? ", latest " + fmtDb(toDb(last.v)) + " dB" : ""));
-  renderHint(H);
+  renderHint(H, c);
 }
 
 /* Every error the app reports, labelled with where it comes from. Apps
@@ -906,7 +909,7 @@ function render() {
   const dirty = changed.length > 0;
 
   $("save").hidden = $("discard").hidden = !dirty && !saving;
-  $("save").disabled = saving || portBad || ptBad || (c.ip !== "" && !validIp(c.ip));
+  $("save").disabled = saving || portBad || ptBlocks(c) || (c.ip !== "" && !validIp(c.ip));
   $("discard").disabled = saving;
   $("save").textContent = saving ? "Saving…" : "Save changes";
   const st = $("saveState");
@@ -939,9 +942,9 @@ function render() {
   });
   document.querySelector("[data-help=level]").textContent =
     "Opens when the input peak reaches " + fmtLvl(c.level) + " dBFS. Line-level speech usually peaks between −30 and −10 dB.";
-  document.querySelector("[data-help=margin]").textContent = cap < MARGIN_MAX
-    ? "Counts as quiet below " + fmtLvl(rel) + " dBFS. Up to " + cap + " dB here, so the closing level stays above the −90 dB floor."
-    : "Counts as quiet below " + fmtLvl(rel) + " dBFS, which is " + c.margin + " dB under the activation level.";
+  document.querySelector("[data-help=margin]").textContent =
+    "Counts as quiet below " + fmtLvl(rel) + " dBFS, which is " + c.margin + " dB under the activation level. Up to " + cap +
+    " dB here, down to the −90 dB floor. You can also drag the Closes line.";
   document.querySelector("[data-help=hold]").textContent = c.hold === 0
     ? "Stops as soon as the trigger goes quiet." : "Keeps sending through gaps shorter than " + c.hold + " s.";
   document.querySelector("[data-help=maxOn]").textContent = c.maxOn === 0
@@ -1010,7 +1013,7 @@ function render() {
 /* Hints about the device's input setting, from the loudest peak in the last
    10 s. Silence on the C8110 sits near -90 dBFS, so "too low" means a faint
    but real signal (-75 to -45 dBFS), not a quiet room. */
-function renderHint(H) {
+function renderHint(H, c) {
   const recent = H.slice(-Math.round(10000 / iv)).map((p) => p.v || 0);   /* last 10 s */
   let hint = null;
   if (recent.length >= 3000 / iv && status && status.nodeConnected && !status.testMode) {
@@ -1027,6 +1030,16 @@ function renderHint(H) {
         ? "If this is a microphone, set Input type to Mic on the device's Audio page, or raise the gain."
         : isMic ? "Raise the input gain on the device's Audio page, or check the source."
         : "Check the input type and gain on the device's Audio page, or the source level."];
+    }
+    /* The quietest tenth of the last 10 s is the noise floor. A closing level
+       at or under it means the input never counts as quiet. */
+    if (!hint && c && c.mode === "auto" && c.trigger === "level") {
+      const dbs = recent.map(toDb).sort((a, b) => a - b);
+      const floorDb = dbs[Math.floor(dbs.length * 0.1)];
+      if (releaseDb(c) <= floorDb + 3) {
+        hint = ["The Closes line is at the noise floor.", "The input rarely drops below " + fmtLvl(floorDb) +
+          " dBFS, so the gate may never close. Drag Closes above that level" + (c.maxOn > 0 ? "." : ", or set a maximum on time.")];
+      }
     }
   }
   $("hint").hidden = !hint;
@@ -1116,7 +1129,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function save() {
   const c = cur();
-  if ((c.ip && !validIp(c.ip)) || portBad || ptBad) return;
+  if ((c.ip && !validIp(c.ip)) || portBad || ptBlocks(c)) return;
   saving = true; saveErr = ""; saveMsg = "Saving…"; pendingRev = 0;
   render();
   const slow = setTimeout(() => { if (saving) { saveMsg = "Saving… the device is still applying the changes"; render(); } }, 3000);

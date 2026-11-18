@@ -37,9 +37,9 @@ The Activation delay, Release hold and Maximum on time sliders take fine steps a
 
 The page follows the system's light or dark theme. The button at the right of the header switches between system, dark and light, and the choice is kept in that browser.
 
-You can drag the Opens and Closes lines on the chart directly. Dragging one line leaves the other in place unless it has to move to keep the margin between 0 and 40 dB. Hold Shift to move both lines together, and press Esc to cancel a drag. Each line can also take keyboard focus: the arrow keys move it 1 dB, Page Up and Page Down move it 6 dB.
+You can drag the Opens and Closes lines on the chart directly. Dragging one line leaves the other in place unless it has to move: Closes can't go above Opens or below −90 dBFS. Hold Shift to move both lines together, and press Esc to cancel a drag. Each line can also take keyboard focus: the arrow keys move it 1 dB, Page Up and Page Down move it 6 dB.
 
-The activation level slider runs from −90 to 0 dBFS. The release margin slider runs from 0 to 40 dB, but its top end shrinks as the activation level nears −90, so the closing level stays at or above the floor. Lowering the activation level pulls the margin down with it when needed. "Saved" only appears after the app has written the values and read them back.
+The activation level slider runs from −90 to 0 dBFS. The release margin slider runs from 0 to 90 dB, but its top end shrinks as the activation level nears −90, so the closing level stays at or above the floor. Lowering the activation level pulls the margin down with it when needed. If the closing level is at or under the input's noise floor (the quietest tenth of the last 10 s), the page warns that the gate may never close. "Saved" only appears after the app has written the values and read them back.
 
 ## Build
 
@@ -129,7 +129,7 @@ Set the jack to line input on the device Audio page before trusting the threshol
 | DestinationIp | empty | Unicast IPv4 address of the RTP listener. Multicast, 240.0.0.0/4 (including 255.255.255.255), loopback 127.0.0.0/8, and 0.0.0.0/8 are rejected |
 | DestinationPort | 49000 | UDP port |
 | ThresholdDb | -45 | Activation level in dBFS peak, −90 to 0 |
-| MarginDb | 6 | Close the gate this many dB below the activation level, 0 to 40. The closing level never goes below −90 dBFS |
+| MarginDb | 6 | Close the gate this many dB below the activation level, 0 to 90. The closing level never goes below −90 dBFS |
 | ActivationDelayMs | 200 | How long the trigger must stay active |
 | DeactivationDelayS | 2 | How long it must stay quiet |
 | MaxOnS | 0 | Force off after this many seconds. 0 disables the limit |
